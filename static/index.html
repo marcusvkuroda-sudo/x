@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Nossos Gastos</title>
+  <meta name="theme-color" content="#2a78d6">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Nossos Gastos">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand"><div class="brand-mark">💸</div>Nossos Gastos</div>
+      <nav class="tabs" aria-label="Seções">
+        <button class="tab" data-view="dashboard"><span class="tab-icon">📊</span>Painel</button>
+        <button class="tab" data-view="transactions"><span class="tab-icon">🧾</span>Lançamentos</button>
+        <button class="tab" data-view="import"><span class="tab-icon">📥</span>Importar <span class="badge" id="import-badge" hidden></span></button>
+      </nav>
+      <button class="btn btn-primary btn-sm top-new" data-action="new-tx">＋ Novo gasto</button>
+      <button class="icon-btn" id="theme-btn" title="Tema claro/escuro" aria-label="Alternar tema">🌓</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ======================================================== DASHBOARD -->
+    <section id="view-dashboard" hidden>
+      <div class="filters">
+        <div class="seg" id="period-seg" role="group" aria-label="Período"></div>
+        <select class="input" id="month-select" aria-label="Escolher mês"></select>
+        <select class="input" id="source-select" aria-label="Cartão ou conta" hidden></select>
+      </div>
+      <div class="chips" id="cat-chips" role="group" aria-label="Categoria"></div>
+
+      <div id="dash-empty" class="card empty" hidden>
+        <div class="big">✨</div>
+        <h3>Ainda não há gastos por aqui</h3>
+        <p>Importe uma fatura do cartão ou adicione um gasto manualmente para ver o painel ganhar vida.</p>
+        <p style="margin-top:16px; display:flex; gap:8px; justify-content:center; flex-wrap:wrap">
+          <button class="btn btn-primary" data-goto="import">📥 Importar fatura</button>
+          <button class="btn" data-action="new-tx">＋ Novo gasto</button>
+        </p>
+      </div>
+
+      <div class="dash" id="dash">
+        <div class="kpis">
+          <div class="card kpi hero">
+            <div class="kpi-label" id="kpi-total-label">Gasto no período</div>
+            <div class="kpi-value" id="kpi-total">–</div>
+            <div class="kpi-sub" id="kpi-total-delta"></div>
+            <svg class="spark" id="kpi-spark" aria-hidden="true"></svg>
+          </div>
+          <div class="card kpi">
+            <div class="kpi-label" id="kpi-avg-label">Média por mês</div>
+            <div class="kpi-value" id="kpi-avg">–</div>
+            <div class="kpi-sub" id="kpi-avg-sub"></div>
+          </div>
+          <div class="card kpi">
+            <div class="kpi-label">Maior categoria</div>
+            <div class="kpi-cat" id="kpi-topcat"></div>
+            <div class="kpi-sub" id="kpi-topcat-sub"></div>
+          </div>
+          <div class="card kpi">
+            <div class="kpi-label">Lançamentos</div>
+            <div class="kpi-value" id="kpi-count">–</div>
+            <div class="kpi-sub" id="kpi-count-sub"></div>
+          </div>
+        </div>
+
+        <div class="grid">
+          <div class="card span-8 fill">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Evolução mês a mês</h2>
+                <p class="card-sub" id="monthly-sub">Gastos por categoria, últimos 12 meses</p>
+              </div>
+            </div>
+            <div class="chart fill-chart" id="chart-monthly"></div>
+            <div class="legend" id="legend-monthly"></div>
+          </div>
+
+          <div class="card span-4">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Para onde vai o dinheiro</h2>
+                <p class="card-sub">Toque numa categoria para filtrar</p>
+              </div>
+            </div>
+            <div class="compo" id="compo"></div>
+            <div class="hbars" id="chart-categories"></div>
+          </div>
+
+          <div class="card span-7">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Calendário de gastos</h2>
+                <p class="card-sub">Quanto mais escuro, mais gastamos no dia</p>
+              </div>
+            </div>
+            <div class="heat-wrap"><div class="chart" id="chart-heat"></div></div>
+            <div class="heat-legend" id="heat-legend"></div>
+          </div>
+
+          <div class="card span-5 fill">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Dia da semana</h2>
+                <p class="card-sub">Média gasta em cada dia da semana</p>
+              </div>
+            </div>
+            <div class="week-bars" id="chart-week"></div>
+          </div>
+
+          <div class="card span-7">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Onde mais gastamos</h2>
+                <p class="card-sub">Top estabelecimentos no período, na cor da categoria</p>
+              </div>
+            </div>
+            <div class="hbars" id="chart-merchants"></div>
+          </div>
+
+          <div class="card span-5">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Parcelas a vencer</h2>
+                <p class="card-sub" id="inst-sub">Compras parceladas ainda em andamento</p>
+              </div>
+            </div>
+            <div class="inst" id="chart-installments"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================== TRANSACTIONS -->
+    <section id="view-transactions" hidden>
+      <div class="tx-toolbar">
+        <input class="input" id="tx-search" type="search" placeholder="Buscar por descrição, estabelecimento ou observação…">
+        <select class="input" id="tx-cat" aria-label="Categoria"></select>
+        <select class="input" id="tx-month" aria-label="Mês"></select>
+        <a class="btn" href="/api/export.csv" download>⬇️ Exportar CSV</a>
+      </div>
+      <div id="tx-container"></div>
+    </section>
+
+    <!-- ======================================================== IMPORT -->
+    <section id="view-import" hidden>
+      <div id="pending-area" style="display:flex; flex-direction:column; gap:16px"></div>
+      <div class="grid">
+        <div class="span-7" style="display:flex; flex-direction:column; gap:16px; min-width:0">
+          <div class="notice error" id="no-key" hidden>
+            <b>Chave da API do Claude não configurada.</b> Crie o arquivo <code>.env</code> na pasta do app com
+            <code>ANTHROPIC_API_KEY=sua-chave</code> e reinicie o servidor. Lançamentos manuais continuam funcionando.
+          </div>
+
+          <div class="card" id="upload-card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Importar fatura</h2>
+                <p class="card-sub">PDF da fatura do cartão ou fotos das páginas. O Claude lê e transforma tudo em lançamentos para vocês revisarem.</p>
+              </div>
+            </div>
+            <label class="dropzone" id="dropzone">
+              <div class="big">📄</div>
+              <h3>Arraste a fatura aqui ou toque para escolher</h3>
+              <p>PDF, JPG, PNG ou HEIC. Várias fotos da mesma fatura podem ir juntas.</p>
+              <input type="file" id="file-input" accept="application/pdf,image/*" multiple hidden>
+            </label>
+            <div class="file-chips" id="file-chips"></div>
+            <div class="form-row">
+              <label class="field">
+                <span>Cartão / conta</span>
+                <input class="input" id="import-source" list="sources-list" placeholder="ex.: Nubank, Itaú Visa">
+              </label>
+              <label class="field">
+                <span>Senha do PDF (se houver)</span>
+                <input class="input" id="import-password" type="password" autocomplete="off" placeholder="geralmente dígitos do CPF">
+                <small>Usada só para abrir o arquivo, não é salva.</small>
+              </label>
+            </div>
+            <div class="notice error" id="upload-error" style="margin-top:12px" hidden></div>
+            <div style="margin-top:16px; display:flex; justify-content:flex-end">
+              <button class="btn btn-primary" id="upload-btn" disabled>✨ Ler com o Claude</button>
+            </div>
+          </div>
+
+        </div>
+
+        <div class="card span-5">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">Histórico de importações</h2>
+              <p class="card-sub">Excluir uma importação remove os lançamentos dela</p>
+            </div>
+          </div>
+          <div class="history" id="history"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <button class="fab" data-action="new-tx"><span>＋</span> Novo gasto</button>
+
+  <dialog id="tx-dialog">
+    <form class="modal" id="tx-form" method="dialog" novalidate>
+      <div class="modal-head">
+        <h2 id="tx-dialog-title">Novo gasto</h2>
+        <button type="button" class="icon-btn" data-close aria-label="Fechar">✕</button>
+      </div>
+      <div class="amount-input">
+        <span>R$</span>
+        <input id="f-amount" inputmode="decimal" autocomplete="off" placeholder="0,00" required>
+      </div>
+      <label class="toggle"><input type="checkbox" id="f-credit"> É estorno / crédito (reduz os gastos)</label>
+      <label class="field">
+        <span>Descrição</span>
+        <input class="input" id="f-description" placeholder="ex.: Feira de domingo" required maxlength="300">
+      </label>
+      <div class="field">
+        <span>Categoria</span>
+        <div class="cat-grid" id="f-cats"></div>
+      </div>
+      <div class="form-row" style="margin-top:0">
+        <label class="field">
+          <span>Data</span>
+          <input class="input" id="f-date" type="date" required>
+        </label>
+        <label class="field">
+          <span>Cartão / conta</span>
+          <input class="input" id="f-source" list="sources-list" placeholder="opcional">
+        </label>
+      </div>
+      <div class="form-row" style="margin-top:0">
+        <label class="field">
+          <span>Estabelecimento</span>
+          <input class="input" id="f-merchant" placeholder="opcional">
+        </label>
+        <label class="field">
+          <span>Parcela</span>
+          <input class="input" id="f-installment" placeholder="ex.: 1/10 (opcional)">
+        </label>
+      </div>
+      <label class="field">
+        <span>Observação</span>
+        <input class="input" id="f-notes" placeholder="opcional" maxlength="500">
+      </label>
+      <div class="notice error" id="tx-error" hidden></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost btn-danger" id="tx-delete" hidden>Excluir</button>
+        <div class="right">
+          <button type="button" class="btn" data-close>Cancelar</button>
+          <button type="submit" class="btn btn-primary" id="tx-save">Salvar</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <datalist id="sources-list"></datalist>
+  <div class="tooltip" id="tooltip" role="status"></div>
+  <div class="toast" id="toast"></div>
+
+  <script src="/static/charts.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
