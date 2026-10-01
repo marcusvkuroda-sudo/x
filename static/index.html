@@ -154,23 +154,18 @@
       <div id="pending-area" style="display:flex; flex-direction:column; gap:16px"></div>
       <div class="grid">
         <div class="span-7" style="display:flex; flex-direction:column; gap:16px; min-width:0">
-          <div class="notice error" id="no-key" hidden>
-            <b>Chave da API do Claude não configurada.</b> Crie o arquivo <code>.env</code> na pasta do app com
-            <code>ANTHROPIC_API_KEY=sua-chave</code> e reinicie o servidor. Lançamentos manuais continuam funcionando.
-          </div>
-
           <div class="card" id="upload-card">
             <div class="card-head">
               <div>
                 <h2 class="card-title">Importar fatura</h2>
-                <p class="card-sub">PDF da fatura do cartão ou fotos das páginas. O Claude lê e transforma tudo em lançamentos para vocês revisarem.</p>
+                <p class="card-sub" id="upload-sub">O app lê a fatura e transforma tudo em lançamentos para vocês revisarem.</p>
               </div>
             </div>
             <label class="dropzone" id="dropzone">
               <div class="big">📄</div>
               <h3>Arraste a fatura aqui ou toque para escolher</h3>
-              <p>PDF, JPG, PNG ou HEIC. Várias fotos da mesma fatura podem ir juntas.</p>
-              <input type="file" id="file-input" accept="application/pdf,image/*" multiple hidden>
+              <p id="dropzone-hint">PDF da fatura baixado do banco, ou arquivo CSV/OFX exportado.</p>
+              <input type="file" id="file-input" accept="application/pdf,.pdf,.csv,.ofx,.qfx,text/csv,image/*" multiple hidden>
             </label>
             <div class="file-chips" id="file-chips"></div>
             <div class="form-row">
@@ -186,7 +181,7 @@
             </div>
             <div class="notice error" id="upload-error" style="margin-top:12px" hidden></div>
             <div style="margin-top:16px; display:flex; justify-content:flex-end">
-              <button class="btn btn-primary" id="upload-btn" disabled>✨ Ler com o Claude</button>
+              <button class="btn btn-primary" id="upload-btn" disabled>✨ Ler fatura</button>
             </div>
           </div>
 

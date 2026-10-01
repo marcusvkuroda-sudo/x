@@ -39,8 +39,10 @@ if __name__ == "__main__":
     print(f"  Neste computador:            http://localhost:{port}")
     if ip:
         print(f"  Nos celulares (mesma Wi-Fi): http://{ip}:{port}")
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        print("\n  Aviso: ANTHROPIC_API_KEY não configurada no .env; a leitura de faturas não vai funcionar.")
+    if config.use_claude():
+        print(f"\n  Leitura de faturas: Claude ({config.CLAUDE_MODEL}), cobrada na API da Anthropic.")
+    else:
+        print("\n  Leitura de faturas: gratuita (PDF do banco, CSV ou OFX).")
     if not config.APP_PASSWORD:
         print("  Dica: defina APP_PASSWORD no .env para pedir senha a quem abrir o app na rede.")
     print("  Para parar, feche esta janela ou aperte Ctrl+C.\n")

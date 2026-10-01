@@ -8,23 +8,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-@pytest.fixture()
-def client(tmp_path, monkeypatch):
-    from app import config
-
-    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(config, "DB_PATH", tmp_path / "gastos.db")
-    monkeypatch.setattr(config, "UPLOAD_DIR", tmp_path / "uploads")
-    monkeypatch.setattr(config, "APP_PASSWORD", "")
-
-    from fastapi.testclient import TestClient
-
-    from app.main import app
-
-    with TestClient(app) as c:
-        yield c
-
-
 def fake_extract(blocks, filenames):
     assert blocks and blocks[0]["type"] in ("document", "image")
     return {
@@ -197,7 +180,7 @@ def test_concurrent_confirms_import_only_once(client, monkeypatch):
 
 def test_corrected_category_is_remembered_for_next_statement(client, monkeypatch):
     first = _import(client, monkeypatch, "white")
-    assert all(t["category_source"] == "claude" for t in first["transactions"])
+    assert all(t["category_source"] == "auto" for t in first["transactions"])
     txs = _payload(first)
     txs[0].update(category="lazer", remember=True)  # iFood corrected by the couple
     assert client.post(f"/api/imports/{first['id']}/confirm", json={"transactions": txs}).status_code == 200
@@ -205,7 +188,7 @@ def test_corrected_category_is_remembered_for_next_statement(client, monkeypatch
     second = _import(client, monkeypatch, "black")
     ifood, magalu = second["transactions"]
     assert (ifood["category"], ifood["category_source"]) == ("lazer", "rule")
-    assert (magalu["category"], magalu["category_source"]) == ("casa", "claude")
+    assert (magalu["category"], magalu["category_source"]) == ("casa", "auto")
 
 
 def test_recategorize_applies_to_similar_and_is_remembered(client):

@@ -136,7 +136,18 @@
   async function loadMeta() {
     state.meta = await api("/api/meta");
     $("#sources-list").replaceChildren(...state.meta.sources.map((s) => h("option", { value: s })));
-    $("#no-key").hidden = state.meta.api_key_configured;
+    describeReader();
+  }
+
+  // Free local reading (PDF text, CSV, OFX) or paid Claude reading (also photos).
+  function describeReader() {
+    const claude = state.meta.reader === "claude";
+    $("#upload-sub").textContent = claude
+      ? "PDF da fatura, fotos das páginas ou CSV/OFX. O Claude lê e transforma tudo em lançamentos para vocês revisarem."
+      : "Leitura gratuita: o app lê a fatura e transforma tudo em lançamentos para vocês revisarem.";
+    $("#dropzone-hint").textContent = claude
+      ? "PDF, CSV, OFX ou fotos (JPG, PNG, HEIC). Várias fotos da mesma fatura podem ir juntas."
+      : "PDF da fatura baixado do app/site do banco, ou arquivo CSV/OFX exportado.";
   }
 
   async function loadTxs() {
@@ -881,7 +892,6 @@
   }
 
   async function renderImport() {
-    $("#no-key").hidden = state.meta.api_key_configured;
     renderHistory();
     const pending = state.imports.filter((i) => i.status === "processing" || i.status === "review");
     const nodes = [];
@@ -895,8 +905,8 @@
             h(
               "div",
               {},
-              h("b", { text: "O Claude está lendo a fatura…" }),
-              h("div", { class: "muted", text: `${imp.filenames.join(", ")} · costuma levar de 30 segundos a 2 minutos. Pode sair desta tela.` })
+              h("b", { text: "Lendo a fatura…" }),
+              h("div", { class: "muted", text: `${imp.filenames.join(", ")} · ${state.meta.reader === "claude" ? "costuma levar de 30 segundos a 2 minutos" : "leva poucos segundos"}. Pode sair desta tela.` })
             )
           )
         );
@@ -1092,7 +1102,7 @@
       rows.length && rows.every((r) => r.dup)
         ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "Parece que esta fatura já foi importada: " }), "todos os lançamentos já existem com a mesma data e valor. Se for o caso, é só descartar.")
         : null,
-      detail.warnings.length ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "O Claude pediu atenção para:" }), h("ul", {}, detail.warnings.map((w) => h("li", { text: w })))) : null,
+      detail.warnings.length ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "Atenção:" }), h("ul", {}, detail.warnings.map((w) => h("li", { text: w })))) : null,
       h("div", { class: "review-head" }, stats, h("label", { class: "field", style: "min-width:200px" }, h("span", { text: "Cartão / conta" }), sourceInput)),
       rows.length
         ? h(

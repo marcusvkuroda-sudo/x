@@ -1,7 +1,7 @@
 # 💸 Nossos Gastos
 
-App local para o casal controlar os gastos: lançamentos manuais, leitura automática de faturas
-do cartão pelo Claude e um painel visual com tudo organizado.
+App local para o casal controlar os gastos: lançamentos manuais, leitura automática das faturas
+do cartão (de graça) e um painel visual com tudo organizado.
 
 Roda num computador de casa, e vocês dois acessam pelo navegador do PC ou do celular, na mesma
 Wi-Fi. Os dados ficam só nesse computador, na pasta `data/`.
@@ -16,8 +16,10 @@ Wi-Fi. Os dados ficam só nesse computador, na pasta `data/`.
   - Parcelas que ainda vão vencer.
   - Filtros por período, mês, categoria e cartão, e modo escuro.
   - Quando o mês atual ainda não tem gastos (a fatura só chega depois), o painel abre no último mês que tem dados.
-- **Importar fatura**: envie o PDF da fatura, inclusive os protegidos por senha, ou fotos das páginas.
-  - O Claude extrai cada lançamento (data, estabelecimento, valor, categoria, parcela, estornos).
+- **Importar fatura (gratuito)**: envie o PDF da fatura baixado do app ou site do banco (inclusive
+  os protegidos por senha), ou o arquivo CSV/OFX que o banco exporta.
+  - O app lê o texto do PDF e extrai cada lançamento (data, estabelecimento, valor, parcela, estornos),
+    sem IA e sem internet. A categoria vem de uma lista de palavras-chave e da memória de categorias.
   - Ignora o pagamento da fatura anterior e as parcelas futuras.
   - Confere a soma com o total impresso na fatura.
   - Vocês revisam, ajustam o que quiserem e confirmam. Lançamentos que parecem já existir chegam desmarcados.
@@ -33,8 +35,8 @@ Wi-Fi. Os dados ficam só nesse computador, na pasta `data/`.
 
 ## Como instalar
 
-Requisitos: **Python 3.10 ou mais novo** ([python.org](https://www.python.org/downloads/)) e uma
-**chave da API da Anthropic** ([console.anthropic.com](https://console.anthropic.com/settings/keys)).
+Requisito: **Python 3.10 ou mais novo** ([python.org](https://www.python.org/downloads/)). Nada mais
+é obrigatório: a leitura de faturas é gratuita.
 
 > No Mac, o `python3` que já vem no sistema é o 3.9, antigo demais: instale o do python.org.
 > No Windows, marque **"Add python.exe to PATH"** durante a instalação.
@@ -45,7 +47,7 @@ Requisitos: **Python 3.10 ou mais novo** ([python.org](https://www.python.org/do
    - **Mac/Linux**: abra o Terminal na pasta e rode `bash iniciar.sh`.
 
    Na primeira vez ele instala as dependências e cria o arquivo `.env`.
-3. Abra o `.env`, cole a chave em `ANTHROPIC_API_KEY=` e inicie de novo.
+3. (Recomendado) Abra o `.env`, defina uma senha em `APP_PASSWORD=` e inicie de novo.
 4. O terminal mostra dois endereços:
    - **Neste computador**: `http://localhost:8000`
    - **Nos celulares**: algo como `http://192.168.0.15:8000`. Abra no celular conectado à mesma Wi-Fi.
@@ -74,19 +76,30 @@ python run.py
 
 | Variável | Para que serve |
 |---|---|
-| `ANTHROPIC_API_KEY` | Chave da API usada para ler as faturas (obrigatória só para importar) |
+| `ANTHROPIC_API_KEY` | Opcional e pago à parte: com ela, PDFs e fotos são lidos pelo Claude (veja abaixo) |
+| `EXTRACTION_MODE` | `auto` (padrão: Claude se houver chave, senão gratuito), `local` (sempre gratuito) ou `claude` |
 | `APP_PASSWORD` | Opcional, mas recomendado: o navegador pede essa senha ao abrir o app (qualquer usuário serve). Sem ela, qualquer pessoa na sua Wi-Fi consegue abrir os gastos |
 | `EXTRACTION_MODEL` | Modelo usado na leitura (padrão `claude-opus-5-5`; `claude-sonnet-5-5` custa cerca de metade) |
 | `EXTRACTION_EFFORT` | `low`, `medium` (padrão) ou `high`. Mais esforço deixa a leitura mais cuidadosa e mais cara |
 | `PORT` | Porta do servidor (padrão 8000) |
 | `DATA_DIR` | Pasta onde ficam o banco, os backups e as faturas enviadas (padrão `data/`) |
 
-## Custos, privacidade e backup
+## Leitura gratuita, opções e limites
 
-- Lançamentos manuais e o painel não usam a API e não custam nada.
-- Cada fatura importada é enviada uma única vez para a API da Anthropic, só para ser lida. Pela
-  tabela de preços, uma fatura de 5 a 10 páginas deve custar algo entre US$ 0,10 e US$ 0,40. O custo
-  real de cada leitura aparece no histórico de importações.
+- **PDF do banco**: funciona com faturas geradas pelo banco (que têm texto dentro). PDFs escaneados ou
+  fotos não têm texto: para esses, exporte CSV/OFX ou use a dica do Claude abaixo.
+- **CSV/OFX**: o jeito mais preciso. O Nubank, por exemplo, exporta a fatura em CSV no app e no site.
+- **Algum banco não funcionou?** Cada banco monta o PDF de um jeito; o leitor é genérico. Avise qual
+  banco e ajustamos o código.
+- **Fotos, sem pagar nada**: envie a foto ou PDF numa conversa no claude.ai (assinatura Pro) pedindo
+  "transforme os lançamentos desta fatura em CSV com as colunas data;descricao;valor" e importe o CSV.
+- **Leitura pelo Claude (paga)**: com `ANTHROPIC_API_KEY` no `.env`, PDFs e fotos são lidos pela API da
+  Anthropic, cobrada à parte da assinatura do Claude (algo como US$ 0,10 a 0,40 por fatura). CSV/OFX
+  continuam sendo lidos de graça.
+
+## Privacidade e backup
+
+- Na leitura gratuita nada sai do computador.
 - A senha do PDF serve só para abrir o arquivo e não é salva.
 - O app guarda sozinho uma cópia diária do banco em `data/backups/` (as últimas 14), sempre ao
   iniciar e antes de excluir uma importação. Para desfazer um estrago, pare o app e copie o backup
@@ -106,7 +119,9 @@ Isso cria 12 meses de gastos fictícios numa pasta separada e não mexe nos dado
 ## Para quem for mexer no código
 
 - `app/main.py`: API (FastAPI) e servidor dos arquivos do front
-- `app/extractor.py`: prompt e chamada ao Claude, com saída estruturada (JSON Schema) e limpeza do resultado
+- `app/local_reader.py`: leitura gratuita de PDF (texto), CSV e OFX
+- `app/categorizer.py`: categorias por palavras-chave e limpeza do nome do estabelecimento
+- `app/extractor.py`: prompt e chamada ao Claude, com saída estruturada (JSON Schema) e limpeza do resultado (opcional, pago)
 - `app/documents.py`: preparo dos arquivos (decripta PDFs, converte HEIC/fotos para JPEG no tamanho que o modelo enxerga)
 - `app/rules.py`: memória de categorias
 - `app/categories.py`: categorias fixas (a ordem define as cores do painel)

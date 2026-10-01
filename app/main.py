@@ -3,7 +3,6 @@ import csv
 import hashlib
 import io
 import json
-import os
 import re
 import secrets
 import shutil
@@ -16,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import config, db, documents, extractor, rules
+from . import config, db, documents, extractor, local_reader, rules
 from .categories import CATEGORIES, CATEGORY_KEYS
 
 CategoryKey = Literal[tuple(CATEGORY_KEYS)]  # type: ignore[valid-type]
@@ -144,7 +143,8 @@ def meta():
         "categories": CATEGORIES,
         "sources": sources,
         "model": config.CLAUDE_MODEL,
-        "api_key_configured": bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")),
+        "api_key_configured": config.has_api_key(),
+        "reader": "claude" if config.use_claude() else "local",
     }
 
 
@@ -269,8 +269,12 @@ def _import_summary(r) -> dict:
 
 def _run_extraction(import_id: int, uploads: list[documents.Upload], password: str) -> None:
     try:
-        blocks = documents.to_content_blocks(uploads, password)
-        result = extractor.extract(blocks, [u.filename for u in uploads])
+        # Bank exports (CSV/OFX) are always read locally: free and exact.
+        if config.use_claude() and all(local_reader.kind(u) in ("pdf", "image") for u in uploads):
+            blocks = documents.to_content_blocks(uploads, password)
+            result = extractor.extract(blocks, [u.filename for u in uploads])
+        else:
+            result = local_reader.read(uploads, password)
     except (documents.DocumentError, extractor.ExtractionError) as exc:
         message = str(exc)
     except Exception as exc:  # keep the import visible instead of stuck in "processing"
@@ -280,7 +284,7 @@ def _run_extraction(import_id: int, uploads: list[documents.Upload], password: s
             # Categories the couple corrected before win over Claude's guess.
             for t in result["transactions"]:
                 remembered = rules.lookup(conn, t["description"], t["merchant"])
-                t["category_source"] = "rule" if remembered else "claude"
+                t["category_source"] = "rule" if remembered else "auto"
                 if remembered:
                     t["category"] = remembered
             conn.execute(
@@ -349,7 +353,8 @@ async def create_import(
             )
         cur = conn.execute(
             "INSERT INTO imports (filenames, file_hash, source, status, model) VALUES (?, ?, ?, 'processing', ?)",
-            (json.dumps([u.filename for u in uploads], ensure_ascii=False), file_hash, source.strip(), config.CLAUDE_MODEL),
+            (json.dumps([u.filename for u in uploads], ensure_ascii=False), file_hash, source.strip(),
+             config.CLAUDE_MODEL if config.use_claude() else "local"),
         )
         import_id = cur.lastrowid
 
