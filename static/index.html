@@ -87,7 +87,7 @@
             <div class="card-head">
               <div>
                 <h2 class="card-title">Para onde vai o dinheiro</h2>
-                <p class="card-sub">Toque numa categoria para filtrar</p>
+                <p class="card-sub" id="cat-sub">Toque numa categoria para filtrar</p>
               </div>
             </div>
             <div class="compo" id="compo"></div>
@@ -98,7 +98,7 @@
             <div class="card-head">
               <div>
                 <h2 class="card-title">Calendário de gastos</h2>
-                <p class="card-sub">Quanto mais escuro, mais gastamos no dia</p>
+                <p class="card-sub" id="heat-sub">Quanto mais escuro, mais gastamos no dia</p>
               </div>
             </div>
             <div class="heat-wrap"><div class="chart" id="chart-heat"></div></div>
@@ -225,7 +225,12 @@
       <div class="field">
         <span>Categoria</span>
         <div class="cat-grid" id="f-cats"></div>
+        <small id="f-learn-hint" hidden>💡 O app vai lembrar dessa categoria nas próximas faturas.</small>
       </div>
+      <label class="toggle apply-similar" id="f-apply-wrap" hidden>
+        <input type="checkbox" id="f-apply-similar" checked>
+        <span id="f-apply-text"></span>
+      </label>
       <div class="form-row" style="margin-top:0">
         <label class="field">
           <span>Data</span>
@@ -253,6 +258,7 @@
       <div class="notice error" id="tx-error" hidden></div>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost btn-danger" id="tx-delete" hidden>Excluir</button>
+        <button type="button" class="btn btn-ghost" id="tx-duplicate" hidden title="Criar um novo lançamento igual a este">⧉ Duplicar</button>
         <div class="right">
           <button type="button" class="btn" data-close>Cancelar</button>
           <button type="submit" class="btn btn-primary" id="tx-save">Salvar</button>
@@ -265,6 +271,7 @@
   <div class="tooltip" id="tooltip" role="status"></div>
   <div class="toast" id="toast"></div>
 
+  <script src="/static/logic.js"></script>
   <script src="/static/charts.js"></script>
   <script src="/static/app.js"></script>
 </body>

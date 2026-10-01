@@ -229,6 +229,9 @@ main {
 }
 
 @media (max-width: 720px) {
+  /* backdrop-filter would make the header the containing block of the fixed tab bar,
+     pinning the "bottom" bar to the header instead of the screen. */
+  .topbar { backdrop-filter: none; background: var(--page); }
   .tabs {
     position: fixed;
     left: 0;
@@ -382,6 +385,20 @@ a.btn { text-decoration: none; color: inherit; }
 .chip .dot { width: 10px; height: 10px; border-radius: 999px; }
 .chip[aria-pressed="true"] { background: var(--ink); color: var(--page); border-color: var(--ink); }
 
+@media (max-width: 720px) {
+  .seg { flex-wrap: wrap; overflow: visible; }
+  .filters select.input { flex: 1 1 150px; }
+  .chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    margin: 0 -16px 16px;
+    padding: 0 16px 2px;
+    scrollbar-width: none;
+  }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip { flex: none; }
+}
+
 /* ------------------------------------------------------------ dashboard grid */
 
 .grid { display: grid; gap: 16px; grid-template-columns: repeat(12, minmax(0, 1fr)); }
@@ -502,6 +519,8 @@ a.btn { text-decoration: none; color: inherit; }
 .hbar-fill { height: 100%; border-radius: 0 4px 4px 0; transition: width 0.4s cubic-bezier(.2,.8,.2,1); }
 .hbar-value { font-weight: 700; font-variant-numeric: tabular-nums; font-size: 14px; text-align: right; }
 .hbar-value small { display: block; color: var(--muted); font-weight: 500; font-size: 11px; }
+.hbar-value small.up { color: var(--bad-text); font-weight: 650; }
+.hbar-value small.down { color: var(--good-text); font-weight: 650; }
 .hbar.compact { grid-template-columns: minmax(0, 1fr) auto; }
 
 /* heatmap */
@@ -559,8 +578,11 @@ a.btn { text-decoration: none; color: inherit; }
 .tx + .tx { border-top: 1px solid var(--grid); border-radius: 0; }
 .tx:hover { background: var(--surface-2); border-radius: 12px; }
 .tx:hover + .tx { border-top-color: transparent; }
-.tx-desc { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tx-meta { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tx-text { display: flex; flex-direction: column; min-width: 0; }
+.tx-desc { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tx-meta { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tx-summary { display: flex; justify-content: space-between; gap: 12px; padding: 0 4px 12px; color: var(--ink-2); font-size: 14px; }
+.more-btn { display: flex; margin: 0 auto 24px; }
 .tx-amount { font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
 .tx-amount.credit { color: var(--good-text); }
 
@@ -621,6 +643,8 @@ a.btn { text-decoration: none; color: inherit; }
 #pending-area:not(:empty) { margin-bottom: 16px; }
 .review-table .tag { font-size: 11px; border-radius: 6px; padding: 1px 6px; background: var(--warn-bg); color: var(--warn-ink); white-space: nowrap; display: inline-block; margin: 0 8px 4px; }
 .review-table .tag.info { background: var(--surface-2); color: var(--ink-2); }
+.review-table .tag.rule { background: var(--accent-soft); color: var(--accent); }
+.review-actions { display: flex; justify-content: space-between; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .table-scroll { overflow-x: auto; margin: 0 -8px; padding: 0 8px; }
 
 @media (max-width: 760px) {
@@ -726,9 +750,11 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(2px); 
 }
 
 .toggle { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--ink-2); cursor: pointer; }
-.toggle input { width: 18px; height: 18px; accent-color: var(--accent); }
+.toggle input { width: 18px; height: 18px; accent-color: var(--accent); flex: none; }
+.apply-similar { background: var(--accent-soft); border-radius: 12px; padding: 10px 12px; color: var(--ink); align-items: flex-start; }
+.apply-similar input { margin-top: 1px; }
 
-.modal-actions { display: flex; gap: 8px; justify-content: space-between; margin-top: 4px; }
+.modal-actions { display: flex; gap: 8px; justify-content: space-between; margin-top: 4px; flex-wrap: wrap; }
 .modal-actions .right { display: flex; gap: 8px; margin-left: auto; }
 
 .toast {

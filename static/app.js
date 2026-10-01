@@ -1,6 +1,7 @@
 /* Nossos Gastos — frontend */
 (function () {
   const { fmt, fmtCompact, h, iso } = window.Charts;
+  const { fold, placeKey, parseAmount, amountInput, activeInstallments } = window.Logic;
 
   const MONTHS = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
   const MONTHS_SHORT = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"];
@@ -14,6 +15,7 @@
     ["year", "Este ano"],
     ["all", "Tudo"],
   ];
+  const TX_PAGE = 150;
 
   const state = {
     meta: { categories: [], sources: [] },
@@ -22,13 +24,16 @@
     view: "dashboard",
     preset: "this_month",
     month: null, // YYYY-MM when preset === "month"
+    periodTouched: false,
     cat: null,
     source: "",
     files: [],
-    review: {}, // import id -> editable rows
+    review: {}, // import id -> { source, rows }
     lastUploadId: null,
     editing: null,
     formCat: "mercado",
+    similar: null, // transactions from the same place as the one being edited
+    txLimit: TX_PAGE,
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -49,11 +54,13 @@
     r.setDate(Math.min(d.getDate(), endOfMonth(r).getDate()));
     return r;
   };
+  const monthsSpanned = (a, b) => (b.getFullYear() - a.getFullYear()) * 12 + b.getMonth() - a.getMonth() + 1;
   const monthLabel = (key) => {
     const [y, m] = key.split("-").map(Number);
     return `${MONTHS[m - 1]} de ${y}`;
   };
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
   const today = () => {
     const t = new Date();
     t.setHours(0, 0, 0, 0);
@@ -61,30 +68,29 @@
   };
   const sum = (arr) => arr.reduce((a, t) => a + t.amount_cents, 0);
 
-  function parseAmount(raw) {
-    let s = String(raw || "").replace(/[R$\s]/g, "");
-    if (!s) return NaN;
-    const neg = s.startsWith("-");
-    s = s.replace(/^[-+]/, "");
-    if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
-    else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
-    if (!/^\d*\.?\d*$/.test(s)) return NaN;
-    const v = parseFloat(s);
-    if (isNaN(v)) return NaN;
-    return Math.round(v * 100) * (neg ? -1 : 1);
-  }
-  const amountInput = (cents) => (cents / 100).toFixed(2).replace(".", ",");
+  const store = {
+    get(key) {
+      try {
+        return localStorage.getItem(key);
+      } catch (_) {
+        return null;
+      }
+    },
+    set(key, value) {
+      try {
+        if (value == null) localStorage.removeItem(key);
+        else localStorage.setItem(key, value);
+      } catch (_) {}
+    },
+  };
+
 
   async function api(path, options = {}) {
     const res = await fetch(path, options);
     if (res.status === 204) return null;
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
-      let msg = body.message;
-      if (!msg && Array.isArray(body.detail)) {
-        msg = body.detail.map((d) => d.msg.replace(/^Value error, /, "")).join(" ");
-      }
-      const err = new Error(msg || `Erro ${res.status}`);
+      const err = new Error(body.message || validationText(body.detail) || `Erro ${res.status}`);
       err.body = body;
       err.status = res.status;
       throw err;
@@ -93,21 +99,43 @@
   }
   const jsonBody = (data, method = "POST") => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
 
+  // FastAPI validation errors -> readable text; rowOf maps a position in the payload to a table row.
+  function validationText(detail, rowOf = (i) => i + 1) {
+    if (!Array.isArray(detail)) return "";
+    return detail
+      .map((d) => {
+        const loc = d.loc || [];
+        const i = loc.indexOf("transactions");
+        const prefix = i >= 0 && Number.isInteger(loc[i + 1]) ? `Linha ${rowOf(loc[i + 1])}: ` : "";
+        return prefix + String(d.msg || "").replace(/^Value error, /, "");
+      })
+      .join(" ");
+  }
+
   let toastTimer;
   function toast(msg) {
     const el = $("#toast");
     el.textContent = msg;
     el.classList.add("show");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 3200);
   }
+
+  const safely =
+    (fn) =>
+    async (...args) => {
+      try {
+        await fn(...args);
+      } catch (e) {
+        toast(e.message || "Algo deu errado. Tente de novo.");
+      }
+    };
 
   /* ------------------------------------------------------------ loading */
 
   async function loadMeta() {
     state.meta = await api("/api/meta");
-    const dl = $("#sources-list");
-    dl.replaceChildren(...state.meta.sources.map((s) => h("option", { value: s })));
+    $("#sources-list").replaceChildren(...state.meta.sources.map((s) => h("option", { value: s })));
     $("#no-key").hidden = state.meta.api_key_configured;
   }
 
@@ -141,6 +169,27 @@
   }
 
   /* ------------------------------------------------------------ period */
+
+  // Card statements arrive after the month closes: while nothing was recorded this month,
+  // open on the latest month with data instead of an empty screen.
+  function autoPeriod() {
+    const current = monthKey(today());
+    const months = [...new Set(state.txs.map((t) => t.date.slice(0, 7)))].filter((m) => m <= current).sort();
+    if (!months.length || months.includes(current)) {
+      state.preset = "this_month";
+      state.month = null;
+    } else {
+      state.preset = "month";
+      state.month = months[months.length - 1];
+    }
+  }
+
+  function choosePeriod(preset, month = null) {
+    state.preset = preset;
+    state.month = month;
+    state.periodTouched = true;
+    renderDashboard();
+  }
 
   function getPeriod() {
     const t = today();
@@ -200,28 +249,15 @@
   /* ------------------------------------------------------------ dashboard */
 
   function renderFilters() {
-    const seg = $("#period-seg");
-    seg.replaceChildren(
+    $("#period-seg").replaceChildren(
       ...PRESETS.map(([key, label]) =>
-        h("button", {
-          type: "button",
-          "aria-pressed": String(state.preset === key),
-          text: label,
-          onclick: () => {
-            state.preset = key;
-            state.month = null;
-            renderDashboard();
-          },
-        })
+        h("button", { type: "button", "aria-pressed": String(state.preset === key), text: label, onclick: () => choosePeriod(key) })
       )
     );
 
     const months = [...new Set(state.txs.map((t) => t.date.slice(0, 7)))].sort().reverse();
     const ms = $("#month-select");
-    ms.replaceChildren(
-      h("option", { value: "", text: "📅 Escolher mês…" }),
-      ...months.map((m) => h("option", { value: m, text: cap(monthLabel(m)) }))
-    );
+    ms.replaceChildren(h("option", { value: "", text: "📅 Escolher mês…" }), ...months.map((m) => h("option", { value: m, text: cap(monthLabel(m)) })));
     ms.value = state.preset === "month" ? state.month : "";
 
     const sources = [...new Set(state.txs.map((t) => t.source).filter(Boolean))].sort();
@@ -230,8 +266,7 @@
     ss.replaceChildren(h("option", { value: "", text: "💳 Todos os cartões" }), ...sources.map((s) => h("option", { value: s, text: s })));
     ss.value = state.source;
 
-    const chips = $("#cat-chips");
-    chips.replaceChildren(
+    $("#cat-chips").replaceChildren(
       h("button", { class: "chip", type: "button", "aria-pressed": String(!state.cat), onclick: () => setCat(null) }, "✨ Todas"),
       ...state.meta.categories.map((c) =>
         h(
@@ -249,7 +284,15 @@
     renderDashboard();
   }
 
+  function deltaText(current, previous) {
+    if (!previous) return current > 0 ? { text: "novo", cls: "up" } : null;
+    const pct = Math.round(((current - previous) / Math.abs(previous)) * 100);
+    if (pct === 0) return { text: "= igual", cls: "" };
+    return { text: `${pct > 0 ? "▲" : "▼"} ${Math.abs(pct)}%`, cls: pct > 0 ? "up" : "down" };
+  }
+
   function renderDashboard() {
+    if (!state.periodTouched) autoPeriod();
     renderFilters();
     const empty = state.txs.length === 0;
     $("#dash-empty").hidden = !empty;
@@ -275,21 +318,17 @@
       if (prev > 0) {
         const pct = ((total - prev) / prev) * 100;
         const up = total > prev;
-        deltaEl.append(
-          h("span", { class: `delta ${up ? "up" : "down"}` }, `${up ? "▲" : "▼"} ${Math.abs(pct).toFixed(0)}%`),
-          ` vs ${period.prevLabel} (${fmt(prev)})`
-        );
+        deltaEl.append(h("span", { class: `delta ${up ? "up" : "down"}` }, `${up ? "▲" : "▼"} ${Math.abs(pct).toFixed(0)}%`), ` vs ${period.prevLabel} (${fmt(prev)})`);
       } else {
         deltaEl.textContent = `Sem gastos em ${period.prevLabel} para comparar`;
       }
     } else {
-      deltaEl.textContent = `${inPeriod.length} lançamentos desde ${MONTHS[period.start.getMonth()]} de ${period.start.getFullYear()}`;
+      deltaEl.textContent = `${plural(inPeriod.length, "lançamento", "lançamentos")} desde ${MONTHS[period.start.getMonth()]} de ${period.start.getFullYear()}`;
     }
 
     // Monthly series: 12 months ending at the period's last month (or the whole period if longer, max 24).
     const endMonth = startOfMonth(period.end > t0 && state.preset === "all" ? t0 : period.end);
-    const spanMonths = (period.end.getFullYear() - period.start.getFullYear()) * 12 + period.end.getMonth() - period.start.getMonth() + 1;
-    const nMonths = Math.min(24, Math.max(12, spanMonths));
+    const nMonths = Math.min(24, Math.max(12, monthsSpanned(period.start, period.end)));
     const monthKeys = [];
     for (let i = nMonths - 1; i >= 0; i--) monthKeys.push(monthKey(addMonths(endMonth, -i)));
     const byMonth = Object.fromEntries(monthKeys.map((k) => [k, {}]));
@@ -316,21 +355,24 @@
 
     window.Charts.sparkline($("#kpi-spark"), months.slice(-12).map((m) => m.total), "var(--accent)");
 
-    // Average
+    // Average. A month still in progress would drag the monthly average down, so it is left out.
     const elapsedEnd = period.end > t0 ? t0 : period.end;
     const days = Math.max(1, Math.round((elapsedEnd - period.start) / 864e5) + 1);
-    const elapsedMonths = (elapsedEnd.getFullYear() - period.start.getFullYear()) * 12 + elapsedEnd.getMonth() - period.start.getMonth() + 1;
+    const elapsedMonths = monthsSpanned(period.start, elapsedEnd);
     if (elapsedMonths > 1) {
+      const currentKey = monthKey(t0);
+      const partial = monthKey(elapsedEnd) === currentKey && t0.getDate() < endOfMonth(t0).getDate();
+      const fullTotal = partial ? total - sum(inPeriod.filter((t) => t.date.startsWith(currentKey))) : total;
       $("#kpi-avg-label").textContent = "Média por mês";
-      $("#kpi-avg").textContent = fmt(Math.round(total / elapsedMonths));
-      $("#kpi-avg-sub").textContent = `≈ ${fmt(Math.round(total / days))} por dia`;
+      $("#kpi-avg").textContent = fmt(Math.round(fullTotal / (partial ? elapsedMonths - 1 : elapsedMonths)));
+      $("#kpi-avg-sub").textContent = partial ? `sem contar ${MONTHS[t0.getMonth()]}, ainda em andamento` : `≈ ${fmt(Math.round(total / days))} por dia`;
     } else {
       $("#kpi-avg-label").textContent = "Média por dia";
       $("#kpi-avg").textContent = fmt(Math.round(total / days));
-      $("#kpi-avg-sub").textContent = `em ${days} ${days === 1 ? "dia" : "dias"}`;
+      $("#kpi-avg-sub").textContent = `em ${plural(days, "dia", "dias")}`;
     }
 
-    // Categories (ignores the category filter so the whole picture stays visible)
+    // Categories (ignore the category filter so the whole picture stays visible)
     const periodAll = base.filter((t) => inRange(t, period.start, period.end));
     const byCat = {};
     const countCat = {};
@@ -338,6 +380,12 @@
       byCat[t.category] = (byCat[t.category] || 0) + t.amount_cents;
       countCat[t.category] = (countCat[t.category] || 0) + 1;
     }
+    const byCatPrev = {};
+    if (period.prevStart) {
+      for (const t of base) if (inRange(t, period.prevStart, period.prevEnd)) byCatPrev[t.category] = (byCatPrev[t.category] || 0) + t.amount_cents;
+    }
+    // Without any spending in the previous period every category would read "novo": skip it.
+    const compare = Object.keys(byCatPrev).length > 0;
     const catTotal = Object.values(byCat).reduce((a, b) => a + Math.max(0, b), 0);
     const ranked = cats.filter((c) => byCat[c.key]).sort((a, b) => byCat[b.key] - byCat[a.key]);
 
@@ -377,32 +425,37 @@
     compo.hidden = catTotal === 0;
     window.Charts.hbars(
       $("#chart-categories"),
-      ranked.map((c) => ({
-        key: c.key,
-        label: c.label,
-        icon: c.icon,
-        color: catColor(c.key),
-        value: byCat[c.key],
-        pct: catTotal ? `${Math.round((byCat[c.key] / catTotal) * 100)}%` : "",
-        sub: `${countCat[c.key]} lanç.`,
-        dim: state.cat && state.cat !== c.key,
-      })),
+      ranked.map((c) => {
+        const delta = compare ? deltaText(byCat[c.key], byCatPrev[c.key] || 0) : null;
+        return {
+          key: c.key,
+          label: c.label,
+          icon: c.icon,
+          color: catColor(c.key),
+          value: byCat[c.key],
+          pct: catTotal ? `${Math.round((byCat[c.key] / catTotal) * 100)}%` : "",
+          sub: delta ? delta.text : plural(countCat[c.key], "lanç.", "lanç."),
+          subClass: delta ? delta.cls : null,
+          dim: state.cat && state.cat !== c.key,
+          tooltip: () => ({
+            title: `${c.icon} ${c.label}`,
+            rows: [
+              { label: "No período", value: fmt(byCat[c.key]) },
+              { label: "Lançamentos", value: String(countCat[c.key]) },
+              ...(compare ? [{ label: `Em ${period.prevLabel}`, value: fmt(byCatPrev[c.key] || 0) }] : []),
+            ],
+          }),
+        };
+      }),
       { onClick: (k) => setCat(state.cat === k ? null : k) }
     );
     if (!ranked.length) $("#chart-categories").replaceChildren(h("p", { class: "muted", text: "Nenhum gasto neste período." }));
+    $("#cat-sub").textContent = compare ? `Variação vs ${period.prevLabel} · toque para filtrar` : "Toque numa categoria para filtrar";
 
-    // ---- Monthly chart
+    // ---- Monthly chart (after the category card, whose height it matches)
     const shownCats = cats.filter((c) => !state.cat || c.key === state.cat).map((c) => ({ ...c, color: catColor(c.key) }));
     $("#monthly-sub").textContent = state.cat ? `${cmap[state.cat].label}, mês a mês` : `Gastos por categoria, ${nMonths} meses · toque num mês para ver só ele`;
-    window.Charts.stackedColumns($("#chart-monthly"), {
-      months,
-      cats: shownCats,
-      onClick: (k) => {
-        state.preset = "month";
-        state.month = k;
-        renderDashboard();
-      },
-    });
+    window.Charts.stackedColumns($("#chart-monthly"), { months, cats: shownCats, onClick: (k) => choosePeriod("month", k) });
     $("#legend-monthly").replaceChildren(
       ...shownCats.filter((c) => months.some((m) => m.values[c.key])).map((c) => h("span", {}, h("i", { style: `background:${c.color}` }), c.label))
     );
@@ -414,7 +467,8 @@
       daily.set(t.date, (daily.get(t.date) || 0) + t.amount_cents);
       counts.set(t.date, (counts.get(t.date) || 0) + 1);
     }
-    window.Charts.calendarHeatmap($("#chart-heat"), $("#heat-legend"), { start: period.start, end: period.end, daily, counts });
+    const heat = window.Charts.calendarHeatmap($("#chart-heat"), $("#heat-legend"), { start: period.start, end: period.end, daily, counts });
+    $("#heat-sub").textContent = heat.truncated ? "Últimos 12 meses do período · quanto mais escuro, mais gastamos" : "Quanto mais escuro, mais gastamos no dia";
 
     // ---- Weekday averages
     const wdTotals = [0, 0, 0, 0, 0, 0, 0];
@@ -426,18 +480,13 @@
       wdTotals[wd] += v;
       if (v > 0) wdActive[wd]++;
     }
-    window.Charts.weekBars(
-      $("#chart-week"),
-      wdTotals.map((v, i) => (wdDays[i] ? Math.round(v / wdDays[i]) : 0)),
-      wdActive
-    );
+    window.Charts.weekBars($("#chart-week"), wdTotals.map((v, i) => (wdDays[i] ? Math.round(v / wdDays[i]) : 0)), wdActive);
 
     // ---- Merchants
     const merchants = {};
     for (const t of inPeriod) {
       const name = t.merchant || t.description;
-      const key = name.toLowerCase();
-      const m = (merchants[key] ||= { name, total: 0, count: 0, cats: {} });
+      const m = (merchants[name.toLowerCase()] ||= { name, total: 0, count: 0, cats: {} });
       m.total += t.amount_cents;
       m.count++;
       m.cats[t.category] = (m.cats[t.category] || 0) + t.amount_cents;
@@ -450,18 +499,18 @@
       $("#chart-merchants"),
       topMerchants.map((m) => {
         const catKey = Object.entries(m.cats).sort((a, b) => b[1] - a[1])[0][0];
-        const c = cmap[catKey];
+        const c = cmap[catKey] || cmap.outros;
         return {
           key: m.name,
           label: m.name,
           icon: c.icon,
-          color: catColor(catKey),
+          color: catColor(c.key),
           value: m.total,
-          sub: m.count === 1 ? "1 compra" : `${m.count} compras`,
+          sub: plural(m.count, "compra", "compras"),
           tooltip: () => ({
             title: m.name,
             rows: [
-              { color: catColor(catKey), label: `${c.icon} ${c.label}`, value: fmt(m.total) },
+              { color: catColor(c.key), label: `${c.icon} ${c.label}`, value: fmt(m.total) },
               { label: "Compras", value: String(m.count) },
               { label: "Média por compra", value: fmt(Math.round(m.total / m.count)) },
             ],
@@ -476,22 +525,9 @@
     renderInstallments(scoped, cmap);
   }
 
+
   function renderInstallments(txs, cmap) {
-    const groups = {};
-    for (const t of txs) {
-      if (!t.installment) continue;
-      const [k, n] = t.installment.split("/").map(Number);
-      if (!n || n < 2) continue;
-      const name = (t.merchant || t.description).replace(/\s*(parc(ela)?\.?\s*)?\d{1,2}\s*\/\s*\d{1,2}\s*$/i, "").trim();
-      const key = `${name.toLowerCase()}|${n}|${t.amount_cents}`;
-      const g = groups[key];
-      if (!g || k > g.k) groups[key] = { name, k, n, amount: t.amount_cents, date: t.date, category: t.category };
-    }
-    const cutoff = iso(new Date(Date.now() - 62 * 864e5));
-    const active = Object.values(groups)
-      .filter((g) => g.k < g.n && g.date >= cutoff)
-      .map((g) => ({ ...g, remaining: (g.n - g.k) * g.amount }))
-      .sort((a, b) => b.remaining - a.remaining);
+    const active = activeInstallments(txs);
     const totalRemaining = active.reduce((a, g) => a + g.remaining, 0);
     const el = $("#chart-installments");
     el.replaceChildren();
@@ -500,7 +536,7 @@
       el.append(h("div", { class: "empty", style: "padding:24px 8px" }, h("div", { class: "big", text: "🎉" }), h("p", { text: "Nenhuma parcela em andamento." })));
       return;
     }
-    $("#inst-sub").textContent = `${fmt(totalRemaining)} ainda a pagar em ${active.length} ${active.length === 1 ? "compra" : "compras"}`;
+    $("#inst-sub").textContent = `${fmt(totalRemaining)} ainda a pagar em ${plural(active.length, "compra", "compras")}`;
     for (const g of active.slice(0, 6)) {
       const c = cmap[g.category];
       const row = h(
@@ -509,7 +545,7 @@
         h("span", { class: "name", text: `${c ? c.icon + " " : ""}${g.name}` }),
         h("b", { class: "num", text: fmt(g.remaining) }),
         h("div", { class: "meter" }, h("div", { style: `width:${(g.k / g.n) * 100}%` })),
-        h("span", { class: "meta", text: `${g.k} de ${g.n} pagas · ${g.n - g.k} × ${fmt(g.amount)}` })
+        h("span", { class: "meta", text: `${g.k} de ${g.n} pagas · faltam ${g.n - g.k} × ${fmt(g.amount)}` })
       );
       window.Charts.bindTooltip(row, () => ({
         title: g.name,
@@ -521,6 +557,7 @@
       }));
       el.append(row);
     }
+    if (active.length > 6) el.append(h("p", { class: "muted", style: "margin:0;font-size:13px", text: `e mais ${plural(active.length - 6, "compra", "compras")}` }));
   }
 
   /* ------------------------------------------------------------ transactions view */
@@ -537,22 +574,23 @@
     monthSel.replaceChildren(h("option", { value: "", text: "Todos os meses" }), ...months.map((m) => h("option", { value: m, text: cap(monthLabel(m)) })));
     monthSel.value = months.includes(prevMonth) ? prevMonth : "";
 
-    const q = $("#tx-search").value.trim().toLowerCase();
+    // Accent-insensitive text search; a value ("45,90") also finds entries of that amount.
+    const raw = $("#tx-search").value.trim();
+    const q = fold(raw);
+    const qAmount = Math.abs(parseAmount(raw));
     const cat = catSel.value;
     const month = monthSel.value;
     const list = state.txs.filter(
       (t) =>
         (!cat || t.category === cat) &&
         (!month || t.date.startsWith(month)) &&
-        (!q || `${t.description} ${t.merchant} ${t.notes} ${t.source}`.toLowerCase().includes(q))
+        (!q || fold(`${t.description} ${t.merchant} ${t.notes} ${t.source}`).includes(q) || Math.abs(t.amount_cents) === qAmount)
     );
 
     const container = $("#tx-container");
     container.replaceChildren();
     if (!state.txs.length) {
-      container.append(
-        h("div", { class: "card empty" }, h("div", { class: "big", text: "🧾" }), h("h3", { text: "Nenhum lançamento ainda" }), h("p", { text: "Use o botão “Novo gasto” ou importe uma fatura." }))
-      );
+      container.append(h("div", { class: "card empty" }, h("div", { class: "big", text: "🧾" }), h("h3", { text: "Nenhum lançamento ainda" }), h("p", { text: "Use o botão “Novo gasto” ou importe uma fatura." })));
       return;
     }
     if (!list.length) {
@@ -560,30 +598,59 @@
       return;
     }
 
+    container.append(h("div", { class: "tx-summary" }, h("span", { text: plural(list.length, "lançamento", "lançamentos") }), h("b", { class: "num", text: fmt(sum(list)) })));
+
     const groups = {};
     for (const t of list) (groups[t.date.slice(0, 7)] ||= []).push(t);
     const fmtDay = new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short" });
+    let shown = 0;
     for (const [m, txs] of Object.entries(groups).sort((a, b) => (a[0] < b[0] ? 1 : -1))) {
-      const rows = txs.map((t) => {
+      if (shown >= state.txLimit) break;
+      const visible = txs.slice(0, state.txLimit - shown);
+      shown += visible.length;
+      const rows = visible.map((t) => {
         const c = cmap[t.category] || cmap.outros;
         const meta = [fmtDay.format(parseDate(t.date)), c.label, t.source, t.installment && `parcela ${t.installment}`, t.notes].filter(Boolean).join(" · ");
         return h(
           "button",
           { class: "tx", type: "button", onclick: () => openTxModal(t) },
-          h("div", { class: "cat-bubble", style: `--c:${catColor(c.key)}`, text: c.icon }),
-          h("div", { style: "min-width:0" }, h("div", { class: "tx-desc", text: t.merchant || t.description }), h("div", { class: "tx-meta", text: t.merchant && t.merchant !== t.description ? `${t.description} · ${meta}` : meta })),
-          h("div", { class: `tx-amount${t.amount_cents < 0 ? " credit" : ""}`, text: fmt(t.amount_cents) })
+          h("span", { class: "cat-bubble", style: `--c:${catColor(c.key)}`, text: c.icon }),
+          h(
+            "span",
+            { class: "tx-text" },
+            h("span", { class: "tx-desc", text: t.merchant || t.description }),
+            h("span", { class: "tx-meta", text: t.merchant && t.merchant !== t.description ? `${t.description} · ${meta}` : meta })
+          ),
+          h("span", { class: `tx-amount${t.amount_cents < 0 ? " credit" : ""}`, text: fmt(t.amount_cents) })
         );
       });
       container.append(
         h(
           "div",
           { class: "tx-month" },
-          h("div", { class: "tx-month-head" }, h("span", { text: cap(monthLabel(m)) }), h("span", { class: "num", text: fmt(sum(txs)) })),
+          h("div", { class: "tx-month-head" }, h("span", { text: cap(monthLabel(m)) }), h("span", { class: "num", text: `${plural(txs.length, "lançamento", "lançamentos")} · ${fmt(sum(txs))}` })),
           h("div", { class: "card tx-list" }, rows)
         )
       );
     }
+    if (shown < list.length) {
+      container.append(
+        h("button", {
+          class: "btn more-btn",
+          type: "button",
+          text: `Mostrar mais (${list.length - shown} restantes)`,
+          onclick: () => {
+            state.txLimit += TX_PAGE;
+            renderTransactions();
+          },
+        })
+      );
+    }
+  }
+
+  function refilterTransactions() {
+    state.txLimit = TX_PAGE;
+    renderTransactions();
   }
 
   /* ------------------------------------------------------------ transaction modal */
@@ -601,6 +668,7 @@
             onclick: () => {
               state.formCat = c.key;
               renderCatGrid();
+              updateApplySimilar();
             },
           },
           h("span", { class: "ic", text: c.icon }),
@@ -610,41 +678,83 @@
     );
   }
 
+  // When an existing entry changes category, offer to fix the other entries from the same place.
+  function updateApplySimilar() {
+    const tx = state.editing;
+    const changed = Boolean(tx && state.formCat !== tx.category);
+    $("#f-learn-hint").hidden = !changed;
+    const others = changed && state.similar ? state.similar.filter((s) => s.category !== state.formCat) : [];
+    $("#f-apply-wrap").hidden = others.length === 0;
+    if (others.length) {
+      const c = catMap()[state.formCat];
+      $("#f-apply-text").textContent = `Mudar também ${others.length === 1 ? "o outro lançamento" : `os outros ${others.length} lançamentos`} de “${tx.merchant || tx.description}” para ${c.label}`;
+    }
+  }
+
   function openTxModal(tx = null) {
     state.editing = tx;
+    state.similar = null;
     $("#tx-dialog-title").textContent = tx ? "Editar lançamento" : "Novo gasto";
     $("#f-amount").value = tx ? amountInput(Math.abs(tx.amount_cents)) : "";
     $("#f-credit").checked = tx ? tx.amount_cents < 0 : false;
     $("#f-description").value = tx ? tx.description : "";
     $("#f-merchant").value = tx ? tx.merchant : "";
     $("#f-date").value = tx ? tx.date : iso(new Date());
-    $("#f-source").value = tx ? tx.source : localStorage.getItem("lastSource") || "";
+    $("#f-source").value = tx ? tx.source : store.get("lastSource") || "";
     $("#f-installment").value = tx ? tx.installment || "" : "";
     $("#f-notes").value = tx ? tx.notes : "";
+    $("#f-apply-similar").checked = true;
     state.formCat = tx ? tx.category : "mercado";
     $("#tx-delete").hidden = !tx;
+    $("#tx-duplicate").hidden = !tx;
     $("#tx-error").hidden = true;
     renderCatGrid();
+    updateApplySimilar();
     $("#tx-dialog").showModal();
-    if (!tx) setTimeout(() => $("#f-amount").focus(), 50);
+    if (tx) {
+      api(`/api/transactions/${tx.id}/similar`)
+        .then((res) => {
+          if (state.editing === tx) {
+            state.similar = res.similar;
+            updateApplySimilar();
+          }
+        })
+        .catch(() => {});
+    } else {
+      setTimeout(() => $("#f-amount").focus(), 50);
+    }
+  }
+
+  // Turns the open entry into a new one (handy for rent, bills and the next installment).
+  function duplicateTx() {
+    if (!state.editing) return;
+    state.editing = null;
+    state.similar = null;
+    $("#tx-dialog-title").textContent = "Novo gasto (cópia)";
+    $("#f-date").value = iso(new Date());
+    const m = /^(\d+)\/(\d+)$/.exec($("#f-installment").value.trim());
+    if (m && +m[1] < +m[2]) $("#f-installment").value = `${+m[1] + 1}/${m[2]}`;
+    $("#tx-delete").hidden = true;
+    $("#tx-duplicate").hidden = true;
+    updateApplySimilar();
+    $("#f-amount").focus();
   }
 
   async function saveTx(e) {
     e.preventDefault();
     const err = $("#tx-error");
     err.hidden = true;
+    const fail = (msg) => {
+      err.textContent = msg;
+      err.hidden = false;
+    };
     const cents = parseAmount($("#f-amount").value);
-    if (!cents || isNaN(cents)) {
-      err.textContent = "Informe um valor válido (ex.: 45,90).";
-      err.hidden = false;
-      return;
-    }
+    if (!cents || isNaN(cents)) return fail("Informe um valor válido (ex.: 45,90).");
     const description = $("#f-description").value.trim();
-    if (!description) {
-      err.textContent = "Escreva uma descrição.";
-      err.hidden = false;
-      return;
-    }
+    if (!description) return fail("Escreva uma descrição.");
+    if (!$("#f-date").value) return fail("Escolha a data.");
+    const installment = $("#f-installment").value.trim();
+    if (installment && !/^\d+\s*\/\s*\d+$/.test(installment)) return fail("Parcela deve estar no formato 3/10.");
     const payload = {
       date: $("#f-date").value,
       description,
@@ -652,20 +762,29 @@
       amount_cents: Math.abs(cents) * ($("#f-credit").checked ? -1 : 1),
       category: state.formCat,
       source: $("#f-source").value.trim(),
-      installment: $("#f-installment").value.trim() || null,
+      installment: installment || null,
       notes: $("#f-notes").value.trim(),
     };
+    const editing = state.editing;
+    const applySimilar = Boolean(editing) && !$("#f-apply-wrap").hidden && $("#f-apply-similar").checked;
+    $("#tx-save").disabled = true;
     try {
-      if (state.editing) await api(`/api/transactions/${state.editing.id}`, jsonBody(payload, "PUT"));
-      else await api("/api/transactions", jsonBody(payload));
-      if (payload.source) localStorage.setItem("lastSource", payload.source);
+      let message = "Gasto adicionado ✨";
+      if (editing) {
+        const res = await api(`/api/transactions/${editing.id}${applySimilar ? "?apply_to_similar=true" : ""}`, jsonBody(payload, "PUT"));
+        message = res.updated_similar ? `Atualizado, junto com mais ${plural(res.updated_similar, "lançamento", "lançamentos")}` : "Lançamento atualizado";
+      } else {
+        await api("/api/transactions", jsonBody(payload));
+      }
+      if (payload.source) store.set("lastSource", payload.source);
       $("#tx-dialog").close();
-      toast(state.editing ? "Lançamento atualizado" : "Gasto adicionado ✨");
+      toast(message);
       await Promise.all([loadTxs(), loadMeta()]);
       render();
     } catch (ex) {
-      err.textContent = ex.message;
-      err.hidden = false;
+      fail(ex.message);
+    } finally {
+      $("#tx-save").disabled = false;
     }
   }
 
@@ -737,23 +856,26 @@
   function startPolling() {
     if (pollTimer) return;
     pollTimer = setInterval(async () => {
-      const before = state.imports.filter((i) => i.status === "processing").map((i) => i.id);
-      await loadImports();
-      const stillProcessing = state.imports.some((i) => i.status === "processing");
-      const changed = before.some((id) => state.imports.find((i) => i.id === id)?.status !== "processing");
-      if (changed) {
-        const last = state.imports.find((i) => i.id === state.lastUploadId);
-        if (last && last.status === "error") {
-          $("#upload-error").textContent = last.error;
-          $("#upload-error").hidden = false;
-        } else if (last && last.status === "review") {
-          toast("Fatura lida! Confira os lançamentos 👀");
+      try {
+        const before = state.imports.filter((i) => i.status === "processing").map((i) => i.id);
+        await loadImports();
+        const changed = before.some((id) => state.imports.find((i) => i.id === id)?.status !== "processing");
+        if (changed) {
+          const last = state.imports.find((i) => i.id === state.lastUploadId);
+          if (last && last.status === "error") {
+            $("#upload-error").textContent = last.error;
+            $("#upload-error").hidden = false;
+          } else if (last && last.status === "review") {
+            toast("Fatura lida! Confira os lançamentos 👀");
+          }
+          if (state.view === "import") renderImport();
         }
-        if (state.view === "import") renderImport();
-      }
-      if (!stillProcessing) {
-        clearInterval(pollTimer);
-        pollTimer = null;
+        if (!state.imports.some((i) => i.status === "processing")) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      } catch (_) {
+        // Network hiccup: try again on the next tick.
       }
     }, 2500);
   }
@@ -761,7 +883,6 @@
   async function renderImport() {
     $("#no-key").hidden = state.meta.api_key_configured;
     renderHistory();
-    const area = $("#pending-area");
     const pending = state.imports.filter((i) => i.status === "processing" || i.status === "review");
     const nodes = [];
     for (const imp of pending) {
@@ -780,30 +901,40 @@
           )
         );
       } else {
-        nodes.push(await reviewCard(imp.id));
+        try {
+          nodes.push(await reviewCard(imp.id));
+        } catch (_) {
+          // Confirmed or discarded on the other phone meanwhile.
+        }
       }
     }
-    area.replaceChildren(...nodes);
+    $("#pending-area").replaceChildren(...nodes);
   }
 
   async function reviewCard(id) {
     const detail = await api(`/api/imports/${id}`);
-    const cmap = catMap();
     if (!state.review[id]) {
-      state.review[id] = detail.transactions.map((t) => ({
-        include: !t.possible_duplicate,
-        date: t.date,
-        description: t.description,
-        merchant: t.merchant,
-        category: t.category,
-        amount: amountInput(t.amount_cents),
-        installment: t.installment,
-        notes: t.notes,
-        dup: t.possible_duplicate,
-      }));
+      state.review[id] = {
+        source: detail.source || detail.issuer || "",
+        rows: detail.transactions.map((t) => ({
+          include: !t.possible_duplicate,
+          date: t.date,
+          description: t.description,
+          merchant: t.merchant,
+          category: t.category,
+          initialCategory: t.category,
+          fromRule: t.category_source === "rule",
+          amount: amountInput(t.amount_cents),
+          installment: t.installment,
+          notes: t.notes,
+          dup: t.possible_duplicate,
+        })),
+      };
     }
-    const rows = state.review[id];
-    const sourceInput = h("input", { class: "input", list: "sources-list", value: detail.source || detail.issuer || "", placeholder: "ex.: Nubank" });
+    const review = state.review[id];
+    const rows = review.rows;
+    const sourceInput = h("input", { class: "input", list: "sources-list", value: review.source, placeholder: "ex.: Nubank" });
+    sourceInput.addEventListener("input", () => (review.source = sourceInput.value));
 
     const stats = h("div", { class: "review-stats" });
     const updateStats = () => {
@@ -833,59 +964,69 @@
     updateStats();
 
     const catOptions = state.meta.categories.map((c) => [c.key, `${c.icon} ${c.label}`]);
-    const tbody = h(
-      "tbody",
-      {},
-      rows.map((r) => {
-        const tr = h("tr", { class: r.include ? "" : "off" });
-        const check = h("input", { type: "checkbox", "aria-label": "Importar este lançamento" });
-        check.checked = r.include;
-        check.addEventListener("change", () => {
-          r.include = check.checked;
-          tr.className = r.include ? "" : "off";
-          updateStats();
+    const catSelects = [];
+    const trs = rows.map((r, idx) => {
+      const tr = h("tr", { class: r.include ? "" : "off" });
+      const check = h("input", { type: "checkbox", "aria-label": "Importar este lançamento" });
+      check.checked = r.include;
+      check.addEventListener("change", () => {
+        r.include = check.checked;
+        tr.className = r.include ? "" : "off";
+        updateStats();
+      });
+      const dateIn = h("input", { class: "input dt", type: "date", value: r.date, required: true });
+      dateIn.addEventListener("change", () => (r.date = dateIn.value));
+      const descIn = h("input", { class: "input", value: r.merchant || r.description, title: r.description });
+      descIn.addEventListener("input", () => (r.merchant = descIn.value));
+      const catSel = h("select", { class: "input cat", "aria-label": "Categoria" }, catOptions.map(([k, l]) => h("option", { value: k, text: l })));
+      catSel.value = r.category;
+      catSelects[idx] = catSel;
+      catSel.addEventListener("change", () => {
+        const before = r.category;
+        r.category = catSel.value;
+        // The same place elsewhere in this statement follows the correction.
+        const key = placeKey(r.merchant || r.description);
+        let followed = 0;
+        rows.forEach((o, j) => {
+          if (o !== r && o.category === before && key && placeKey(o.merchant || o.description) === key) {
+            o.category = r.category;
+            catSelects[j].value = r.category;
+            followed++;
+          }
         });
-        const dateIn = h("input", { class: "input dt", type: "date", value: r.date });
-        dateIn.addEventListener("change", () => (r.date = dateIn.value));
-        const descIn = h("input", { class: "input", value: r.merchant || r.description, title: r.description });
-        descIn.addEventListener("input", () => (r.merchant = descIn.value));
-        const catSel = h("select", { class: "input cat" }, catOptions.map(([k, l]) => h("option", { value: k, text: l })));
-        catSel.value = r.category;
-        catSel.addEventListener("change", () => (r.category = catSel.value));
-        const amtIn = h("input", { class: "input amt", inputmode: "decimal", value: r.amount });
-        amtIn.addEventListener("input", () => {
-          r.amount = amtIn.value;
-          updateStats();
-        });
-        const tags = [];
-        if (r.installment) tags.push(h("span", { class: "tag info", text: `parcela ${r.installment}` }));
-        if (r.amount.startsWith("-")) tags.push(h("span", { class: "tag info", text: "estorno/crédito" }));
-        if (r.dup) tags.push(h("span", { class: "tag", text: `possível duplicado de “${r.dup}”` }));
-        if (r.notes) tags.push(h("span", { class: "tag info", text: r.notes }));
-        tr.append(
-          h("td", {}, check),
-          h("td", {}, dateIn),
-          h("td", { class: "desc-cell" }, descIn, tags.length ? h("div", {}, tags) : null),
-          h("td", {}, catSel),
-          h("td", {}, amtIn)
-        );
-        return tr;
-      })
-    );
+        if (followed) toast(`Também mudei ${plural(followed, "lançamento igual", "lançamentos iguais")}`);
+      });
+      const amtIn = h("input", { class: "input amt", inputmode: "decimal", value: r.amount, "aria-label": "Valor" });
+      amtIn.addEventListener("input", () => {
+        r.amount = amtIn.value;
+        updateStats();
+      });
+      const tags = [];
+      if (r.fromRule) tags.push(h("span", { class: "tag rule", text: "categoria lembrada" }));
+      if (r.installment) tags.push(h("span", { class: "tag info", text: `parcela ${r.installment}` }));
+      if (parseAmount(r.amount) < 0) tags.push(h("span", { class: "tag info", text: "estorno/crédito" }));
+      if (r.dup) tags.push(h("span", { class: "tag", text: `possível duplicado de “${r.dup}”` }));
+      if (r.notes) tags.push(h("span", { class: "tag info", text: r.notes }));
+      tr.append(h("td", {}, check), h("td", {}, dateIn), h("td", { class: "desc-cell" }, descIn, tags.length ? h("div", {}, tags) : null), h("td", {}, catSel), h("td", {}, amtIn));
+      return tr;
+    });
 
-    const errEl = h("div", { class: "notice error", hidden: true });
+    const errEl = h("div", { class: "notice error", hidden: true, style: "margin-top:12px" });
     const confirmBtn = h("button", { class: "btn btn-primary", type: "button" }, "✅ Importar selecionados");
     confirmBtn.addEventListener("click", async () => {
       errEl.hidden = true;
       const txs = [];
+      const rowOf = [];
       for (const [i, r] of rows.entries()) {
         if (!r.include) continue;
         const cents = parseAmount(r.amount);
-        if (!cents || isNaN(cents) || !r.date) {
-          errEl.textContent = `Linha ${i + 1}: confira a data e o valor.`;
+        const problem = !r.date ? "preencha a data" : !cents || isNaN(cents) ? "confira o valor" : null;
+        if (problem) {
+          errEl.textContent = `Linha ${i + 1}: ${problem}.`;
           errEl.hidden = false;
           return;
         }
+        rowOf.push(i + 1);
         txs.push({
           date: r.date,
           description: r.description || r.merchant,
@@ -894,31 +1035,51 @@
           category: r.category,
           installment: r.installment,
           notes: r.notes || "",
+          remember: r.category !== r.initialCategory,
         });
+      }
+      if (!txs.length) {
+        errEl.textContent = "Nenhum lançamento selecionado. Para não importar nada, use Descartar.";
+        errEl.hidden = false;
+        return;
       }
       confirmBtn.disabled = true;
       try {
-        const res = await api(`/api/imports/${id}/confirm`, jsonBody({ source: sourceInput.value.trim(), transactions: txs }));
+        const res = await api(`/api/imports/${id}/confirm`, jsonBody({ source: review.source.trim(), transactions: txs }));
         delete state.review[id];
-        toast(`${res.imported} lançamentos importados 🎉`);
+        toast(`${plural(res.imported, "lançamento importado", "lançamentos importados")} 🎉`);
         await Promise.all([loadTxs(), loadImports(), loadMeta()]);
         renderImport();
       } catch (ex) {
-        errEl.textContent = ex.message;
+        if (ex.status === 409 || ex.status === 404) {
+          toast(ex.message);
+          delete state.review[id];
+          await Promise.all([loadTxs(), loadImports()]);
+          renderImport();
+          return;
+        }
+        errEl.textContent = validationText(ex.body?.detail, (j) => rowOf[j]) || ex.message;
         errEl.hidden = false;
         confirmBtn.disabled = false;
       }
     });
-    const discardBtn = h("button", { class: "btn btn-ghost btn-danger", type: "button" }, "Descartar");
-    discardBtn.addEventListener("click", async () => {
-      if (!confirm("Descartar esta leitura? Nada será importado.")) return;
-      await api(`/api/imports/${id}`, { method: "DELETE" });
-      delete state.review[id];
-      await loadImports();
-      renderImport();
-    });
+    const discardBtn = h("button", { class: "btn btn-ghost btn-danger", type: "button" }, rows.length ? "Descartar" : "Descartar leitura");
+    discardBtn.addEventListener(
+      "click",
+      safely(async () => {
+        if (rows.length && !confirm("Descartar esta leitura? Nada será importado.")) return;
+        await api(`/api/imports/${id}`, { method: "DELETE" });
+        delete state.review[id];
+        await loadImports();
+        renderImport();
+      })
+    );
 
-    const titleBits = [detail.issuer, detail.reference_month && cap(monthLabel(detail.reference_month)), detail.due_date && `vence ${parseDate(detail.due_date).toLocaleDateString("pt-BR")}`].filter(Boolean);
+    const titleBits = [
+      detail.issuer,
+      detail.reference_month && cap(monthLabel(detail.reference_month)),
+      detail.due_date && `vence ${parseDate(detail.due_date).toLocaleDateString("pt-BR")}`,
+    ].filter(Boolean);
 
     return h(
       "div",
@@ -928,6 +1089,9 @@
         { class: "card-head" },
         h("div", {}, h("h2", { class: "card-title", text: `👀 Revisar: ${titleBits[0] || detail.filenames.join(", ")}` }), h("p", { class: "card-sub", text: titleBits.slice(1).join(" · ") || detail.filenames.join(", ") }))
       ),
+      rows.length && rows.every((r) => r.dup)
+        ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "Parece que esta fatura já foi importada: " }), "todos os lançamentos já existem com a mesma data e valor. Se for o caso, é só descartar.")
+        : null,
       detail.warnings.length ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "O Claude pediu atenção para:" }), h("ul", {}, detail.warnings.map((w) => h("li", { text: w })))) : null,
       h("div", { class: "review-head" }, stats, h("label", { class: "field", style: "min-width:200px" }, h("span", { text: "Cartão / conta" }), sourceInput)),
       rows.length
@@ -938,12 +1102,12 @@
               "table",
               { class: "review-table" },
               h("thead", {}, h("tr", {}, h("th", {}), h("th", { text: "Data" }), h("th", { text: "Descrição" }), h("th", { text: "Categoria" }), h("th", { text: "Valor (R$)", style: "text-align:right" }))),
-              tbody
+              h("tbody", {}, trs)
             )
           )
         : h("p", { class: "muted", text: "Nenhum lançamento encontrado neste documento." }),
       errEl,
-      h("div", { style: "display:flex; justify-content:space-between; gap:8px; margin-top:16px; flex-wrap:wrap" }, discardBtn, confirmBtn)
+      h("div", { class: "review-actions" }, discardBtn, rows.length ? confirmBtn : null)
     );
   }
 
@@ -965,14 +1129,17 @@
           imp.cost_usd != null && `custo ≈ US$ ${imp.cost_usd.toFixed(2).replace(".", ",")}`,
         ].filter(Boolean);
         const del = h("button", { class: "btn btn-sm btn-ghost btn-danger", type: "button", text: "Excluir" });
-        del.addEventListener("click", async () => {
-          const msg = imp.status === "confirmed" ? "Excluir esta importação e todos os lançamentos que vieram dela?" : "Remover este registro?";
-          if (!confirm(msg)) return;
-          await api(`/api/imports/${imp.id}`, { method: "DELETE" });
-          toast("Importação excluída");
-          await Promise.all([loadTxs(), loadImports()]);
-          renderImport();
-        });
+        del.addEventListener(
+          "click",
+          safely(async () => {
+            const msg = imp.status === "confirmed" ? "Excluir esta importação e todos os lançamentos que vieram dela?" : "Remover este registro?";
+            if (!confirm(msg)) return;
+            await api(`/api/imports/${imp.id}`, { method: "DELETE" });
+            toast("Importação excluída");
+            await Promise.all([loadTxs(), loadImports()]);
+            renderImport();
+          })
+        );
         return h(
           "div",
           { class: "history-row" },
@@ -990,18 +1157,20 @@
 
   /* ------------------------------------------------------------ theme */
 
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
   function applyTheme(theme) {
     if (theme) document.documentElement.setAttribute("data-theme", theme);
     else document.documentElement.removeAttribute("data-theme");
   }
 
+  // Toggles light/dark; choosing what the system already uses goes back to following it.
   function toggleTheme() {
     const dark = getComputedStyle(document.documentElement).colorScheme === "dark";
     const next = dark ? "light" : "dark";
-    try {
-      localStorage.setItem("theme", next);
-    } catch (_) {}
-    applyTheme(next);
+    const followSystem = (next === "dark") === darkQuery.matches;
+    store.set("theme", followSystem ? null : next);
+    applyTheme(followSystem ? null : next);
     render();
   }
 
@@ -1011,25 +1180,24 @@
     document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => setView(t.dataset.view)));
     document.querySelectorAll("[data-goto]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.goto)));
     document.querySelectorAll('[data-action="new-tx"]').forEach((b) => b.addEventListener("click", () => openTxModal()));
-    document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => $("#tx-dialog").close()));
+    const dialog = $("#tx-dialog");
+    document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => dialog.close()));
+    dialog.addEventListener("click", (e) => e.target === dialog && dialog.close()); // backdrop
     $("#tx-form").addEventListener("submit", saveTx);
-    $("#tx-delete").addEventListener("click", deleteTx);
+    $("#tx-delete").addEventListener("click", safely(deleteTx));
+    $("#tx-duplicate").addEventListener("click", duplicateTx);
     $("#theme-btn").addEventListener("click", toggleTheme);
+    darkQuery.addEventListener("change", () => !store.get("theme") && render());
 
-    $("#month-select").addEventListener("change", (e) => {
-      if (!e.target.value) return;
-      state.preset = "month";
-      state.month = e.target.value;
-      renderDashboard();
-    });
+    $("#month-select").addEventListener("change", (e) => e.target.value && choosePeriod("month", e.target.value));
     $("#source-select").addEventListener("change", (e) => {
       state.source = e.target.value;
       renderDashboard();
     });
 
-    $("#tx-search").addEventListener("input", renderTransactions);
-    $("#tx-cat").addEventListener("change", renderTransactions);
-    $("#tx-month").addEventListener("change", renderTransactions);
+    $("#tx-search").addEventListener("input", refilterTransactions);
+    $("#tx-cat").addEventListener("change", refilterTransactions);
+    $("#tx-month").addEventListener("change", refilterTransactions);
 
     const dz = $("#dropzone");
     const fi = $("#file-input");
@@ -1062,12 +1230,21 @@
       if (["dashboard", "transactions", "import"].includes(v) && v !== state.view) setView(v);
     });
     window.addEventListener("scroll", () => window.Charts.tooltip.hide(), { passive: true });
+
+    // Two people use the app: coming back to it picks up what the other one changed.
+    document.addEventListener(
+      "visibilitychange",
+      safely(async () => {
+        if (document.visibilityState !== "visible") return;
+        await Promise.all([loadTxs(), loadImports()]);
+        if (!dialog.open) render();
+        if (state.imports.some((i) => i.status === "processing")) startPolling();
+      })
+    );
   }
 
   async function boot() {
-    try {
-      applyTheme(localStorage.getItem("theme"));
-    } catch (_) {}
+    applyTheme(store.get("theme"));
     bind();
     await Promise.all([loadMeta(), loadTxs(), loadImports()]);
     if (state.imports.some((i) => i.status === "processing")) startPolling();

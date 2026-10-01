@@ -2,6 +2,7 @@
 structured transactions."""
 
 import json
+import re
 from datetime import date
 
 import anthropic
@@ -81,6 +82,11 @@ Regras importantes:
 - NÃO inclua pagamentos da fatura anterior ("Pagamento recebido", "Pagamento efetuado"), saldo \
 anterior, total da fatura, limites ou resumos — só lançamentos de gastos, estornos, tarifas, \
 IOF, juros e encargos.
+- NÃO inclua lançamentos futuros: seções como "Próximas faturas", "Lançamentos futuros", \
+"Compras parceladas a vencer" ou "Saldo parcelado" listam parcelas que ainda serão cobradas em \
+outras faturas. Inclua apenas o que é cobrado nesta fatura.
+- Se a mesma compra aparecer em mais de uma página (por exemplo, numa lista resumida e na lista \
+detalhada), registre-a uma vez só.
 - Para parcelas a partir da 2ª (ex.: 3/10), use como date a data de fechamento da fatura (ou o \
 primeiro dia do mês de referência, se o fechamento não aparecer) para que o gasto conte no mês \
 em que é cobrado; registre a data original da compra em notes.
@@ -98,7 +104,52 @@ Não invente lançamentos: se algo estiver ilegível, registre em warnings."""
 def _to_cents(value) -> int | None:
     if value is None:
         return None
-    return int(round(float(value) * 100))
+    try:
+        return int(round(float(value) * 100))
+    except (TypeError, ValueError):
+        return None
+
+
+def _iso_date(value) -> str | None:
+    try:
+        return date.fromisoformat(str(value)[:10]).isoformat()
+    except ValueError:
+        return None
+
+
+def _month(value) -> str | None:
+    value = str(value or "")
+    return value[:7] if re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", value[:7]) else None
+
+
+def _installment(value) -> str | None:
+    m = re.search(r"(\d{1,3})\s*(?:/|de|of)\s*(\d{1,3})", str(value or ""), re.IGNORECASE)
+    if not m:
+        return None
+    k, n = int(m.group(1)), int(m.group(2))
+    return f"{k}/{n}" if 1 <= k <= n and n >= 2 else None
+
+
+def _api_error(exc: anthropic.APIError) -> str:
+    message = getattr(exc, "message", "") or str(exc)
+    if "credit balance" in message.lower():
+        return "Acabaram os créditos da conta da Anthropic. Adicione créditos em console.anthropic.com e tente de novo."
+    if isinstance(exc, anthropic.AuthenticationError):
+        return "Chave da API do Claude inválida. Confira ANTHROPIC_API_KEY no arquivo .env e reinicie o app."
+    if isinstance(exc, anthropic.PermissionDeniedError):
+        return "A chave da API não tem permissão para usar este modelo. Confira a conta em console.anthropic.com."
+    if isinstance(exc, anthropic.NotFoundError):
+        return f"O modelo '{config.CLAUDE_MODEL}' não foi encontrado. Confira EXTRACTION_MODEL no arquivo .env."
+    if isinstance(exc, anthropic.RateLimitError):
+        return "Limite de uso da API atingido. Tente novamente em alguns minutos."
+    if isinstance(exc, (anthropic.OverloadedError, anthropic.InternalServerError, anthropic.ServiceUnavailableError)):
+        return "A API do Claude está sobrecarregada agora. Tente novamente em alguns minutos."
+    if isinstance(exc, anthropic.APIConnectionError):
+        return "Sem conexão com a API do Claude. Verifique a internet."
+    if isinstance(exc, anthropic.BadRequestError):
+        return f"A API recusou o documento: {message}"
+    status = getattr(exc, "status_code", None)
+    return f"Erro da API do Claude{f' ({status})' if status else ''}. Tente novamente."
 
 
 def extract(content_blocks: list[dict], filenames: list[str]) -> dict:
@@ -127,18 +178,15 @@ def extract(content_blocks: list[dict], filenames: list[str]) -> dict:
             messages=[{"role": "user", "content": user_content}],
         ) as stream:
             response = stream.get_final_message()
-    except anthropic.AuthenticationError as exc:
+    except anthropic.APIError as exc:
+        raise ExtractionError(_api_error(exc)) from exc
+    except TypeError as exc:
+        # The SDK raises TypeError when it finds no API key at all.
+        if "authentication" not in str(exc).lower():
+            raise
         raise ExtractionError(
-            "Chave da API do Claude inválida ou ausente. Configure ANTHROPIC_API_KEY no arquivo .env."
+            "Chave da API do Claude não configurada. Coloque ANTHROPIC_API_KEY no arquivo .env e reinicie o app."
         ) from exc
-    except anthropic.BadRequestError as exc:
-        raise ExtractionError(f"A API recusou o documento: {exc.message}") from exc
-    except anthropic.RateLimitError as exc:
-        raise ExtractionError("Limite de uso da API atingido. Tente novamente em alguns minutos.") from exc
-    except anthropic.APIStatusError as exc:
-        raise ExtractionError(f"Erro da API do Claude ({exc.status_code}). Tente novamente.") from exc
-    except anthropic.APIConnectionError as exc:
-        raise ExtractionError("Sem conexão com a API do Claude. Verifique a internet.") from exc
 
     if response.stop_reason == "refusal":
         raise ExtractionError("O Claude não conseguiu processar este documento.")
@@ -153,31 +201,44 @@ def extract(content_blocks: list[dict], filenames: list[str]) -> dict:
     except json.JSONDecodeError as exc:
         raise ExtractionError("Resposta inesperada do Claude. Tente novamente.") from exc
 
+    warnings = [str(w) for w in data.get("warnings") or []]
     transactions = []
+    undated = 0
     for t in data.get("transactions", []):
         cents = _to_cents(t.get("amount"))
         if not cents:
             continue
+        tx_date = _iso_date(t.get("date"))
+        if not tx_date:
+            undated += 1
+        description = str(t.get("description") or "").strip()
+        merchant = str(t.get("merchant") or "").strip()
+        notes = str(t.get("notes") or "").strip()
+        installment = _installment(t.get("installment"))
+        if t.get("installment") and not installment:
+            notes = f"{notes} · parcela: {t['installment']}".strip(" ·")
         transactions.append(
             {
-                "date": t["date"],
-                "description": t["description"].strip(),
-                "merchant": (t.get("merchant") or "").strip(),
+                "date": tx_date or "",
+                "description": (description or merchant or "Lançamento")[:300],
+                "merchant": merchant[:200],
                 "amount_cents": cents,
                 "category": t["category"] if t.get("category") in CATEGORY_KEYS else "outros",
-                "installment": t.get("installment") or None,
-                "notes": (t.get("notes") or "").strip(),
+                "installment": installment,
+                "notes": notes[:500],
             }
         )
+    if undated:
+        warnings.append(f"{undated} lançamento(s) ficaram sem data legível; preencha antes de importar.")
 
     return {
         "document_type": data.get("document_type"),
-        "issuer": data.get("issuer"),
-        "reference_month": data.get("reference_month"),
-        "due_date": data.get("due_date"),
+        "issuer": (str(data["issuer"])[:100] if data.get("issuer") else None),
+        "reference_month": _month(data.get("reference_month")),
+        "due_date": _iso_date(data.get("due_date")) if data.get("due_date") else None,
         "statement_total_cents": _to_cents(data.get("statement_total")),
         "transactions": transactions,
-        "warnings": data.get("warnings") or [],
+        "warnings": warnings,
         "model": response.model,
         "input_tokens": response.usage.input_tokens,
         "output_tokens": response.usage.output_tokens,

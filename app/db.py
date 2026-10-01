@@ -1,5 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
+from datetime import date
 
 from . import config
 
@@ -39,7 +40,16 @@ CREATE TABLE IF NOT EXISTS transactions (
 
 CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_imports_hash ON imports(file_hash);
+
+-- Category corrections made by the couple, applied to future imports.
+CREATE TABLE IF NOT EXISTS category_rules (
+    key TEXT PRIMARY KEY,              -- "d:<normalized description>" or "m:<normalized merchant>"
+    category TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
 """
+
+BACKUPS_TO_KEEP = 14
 
 
 def connect() -> sqlite3.Connection:
@@ -64,3 +74,27 @@ def init() -> None:
     with session() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+
+
+def backup_daily() -> None:
+    """Keeps one copy of the database per day (the last BACKUPS_TO_KEEP days).
+
+    Called at startup and before destructive operations, so an accidental
+    deletion can always be undone by restoring yesterday's file.
+    """
+    if not config.DB_PATH.exists():
+        return
+    folder = config.DATA_DIR / "backups"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"gastos-{date.today().isoformat()}.db"
+    if target.exists():
+        return
+    src = connect()
+    dst = sqlite3.connect(target)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+    for old in sorted(folder.glob("gastos-*.db"))[:-BACKUPS_TO_KEEP]:
+        old.unlink(missing_ok=True)

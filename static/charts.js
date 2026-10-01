@@ -117,13 +117,24 @@
     },
   };
 
+  // On touch screens the pointer "leaves" as soon as the finger lifts, so a tapped
+  // tooltip stays open until the next tap elsewhere (or a scroll).
   function bindTooltip(target, getContent) {
+    target.dataset.tt = "";
     target.addEventListener("pointerenter", (e) => tooltip.show(e, getContent()));
-    target.addEventListener("pointermove", (e) => tooltip.move(e));
-    target.addEventListener("pointerleave", () => tooltip.hide());
+    target.addEventListener("pointermove", (e) => e.pointerType !== "touch" && tooltip.move(e));
+    target.addEventListener("pointerleave", (e) => e.pointerType !== "touch" && tooltip.hide());
     target.addEventListener("focus", (e) => tooltip.show(e, getContent()));
     target.addEventListener("blur", () => tooltip.hide());
   }
+
+  document.addEventListener(
+    "pointerdown",
+    (e) => {
+      if (!(e.target instanceof Element) || !e.target.closest("[data-tt]")) tooltip.hide();
+    },
+    { passive: true }
+  );
 
   /* ------------------------------------------------------------ stacked columns */
 
@@ -229,8 +240,9 @@
 
   function sparkline(el, values, color) {
     el.replaceChildren();
-    const w = el.clientWidth || 200;
-    const hgt = el.clientHeight || 60;
+    const box = el.getBoundingClientRect();
+    const w = box.width || 200;
+    const hgt = box.height || 60;
     el.setAttribute("viewBox", `0 0 ${w} ${hgt}`);
     if (values.length < 2) return;
     const max = Math.max(...values, 1);
@@ -261,7 +273,7 @@
           h("div", { class: "hbar-label" }, h("span", { class: "name", text: (compact && it.icon ? it.icon + " " : "") + it.label }), it.pct != null ? h("span", { class: "pct", text: it.pct }) : null),
           h("div", { class: "hbar-track" }, h("div", { class: "hbar-fill", style: `width:${pctWidth}%;background:${it.color}` }))
         ),
-        h("div", { class: "hbar-value" }, fmt(it.value), it.sub ? h("small", { text: it.sub }) : null)
+        h("div", { class: "hbar-value" }, fmt(it.value), it.sub ? h("small", { class: it.subClass || null, text: it.sub }) : null)
       );
       if (it.tooltip) bindTooltip(row, it.tooltip);
       if (onClick) row.addEventListener("click", () => onClick(it.key));
@@ -352,7 +364,8 @@
         t.textContent = MONTHS_SHORT[d.getMonth()];
       }
 
-      const rect = svg("rect", { x, y: yy, width: cell, height: cell, rx: Math.min(6, cell / 4), style: `fill:${colors[lv]};opacity:${future ? 0.35 : 1};cursor:default;outline:none`, tabindex: v ? 0 : -1 }, root);
+      // Not focusable on purpose: a year has 365 cells; the Lançamentos list carries the same values.
+      const rect = svg("rect", { x, y: yy, width: cell, height: cell, rx: Math.min(6, cell / 4), style: `fill:${colors[lv]};opacity:${future ? 0.35 : 1};cursor:default` }, root);
       if (calendarMode) {
         const t = svg("text", { x: x + 7, y: yy + 16, "font-size": 11, "font-weight": 600, style: `fill:${luminance(colors[lv]) > 0.35 ? "#0b0b0b" : "#ffffff"};pointer-events:none;opacity:${future ? 0.5 : 0.85}` }, root);
         t.textContent = d.getDate();
@@ -368,6 +381,7 @@
     container.appendChild(root);
 
     legendEl.replaceChildren(h("span", { text: "Menos" }), ...colors.map((c) => h("i", { style: `background:${c}` })), h("span", { text: "Mais" }));
+    return { truncated: first > start };
   }
 
   /* ------------------------------------------------------------ weekday columns */
@@ -383,10 +397,10 @@
         "div",
         { class: `week-col${i === peak && v > 0 ? " peak" : ""}`, tabindex: 0 },
         h("div", { class: "val", text: v > 0 ? fmtCompact(v) : "" }),
-        h("div", { class: "bar", style: `height:${Math.max(1.5, (v / max) * 100)}%` }),
+        // 78% leaves room for the value label above the tallest bar.
+        h("div", { class: "bar", style: `height:${(v / max) * 78}%` }),
         h("div", { class: "lbl", text: names[i] })
       );
-      col.querySelector(".bar").style.height = `${(v / max) * 100 * 0.78}%`;
       bindTooltip(col, () => ({
         title: `Média por ${full[i]}`,
         rows: [

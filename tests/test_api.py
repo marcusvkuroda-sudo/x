@@ -150,11 +150,11 @@ def test_encrypted_pdf_needs_password(client, monkeypatch):
     assert wait_for(client, r.json()["id"])["status"] == "review"
 
 
-def _png():
+def _png(color="white"):
     from PIL import Image
 
     buf = io.BytesIO()
-    Image.new("RGB", (40, 40), "white").save(buf, format="PNG")
+    Image.new("RGB", (40, 40), color).save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -164,3 +164,89 @@ def test_password_guard(client, monkeypatch):
     monkeypatch.setattr(config, "APP_PASSWORD", "segredo")
     assert client.get("/api/meta").status_code == 401
     assert client.get("/api/meta", auth=("nos", "segredo")).status_code == 200
+
+
+def _import(client, monkeypatch, png_color="white"):
+    from app import extractor
+
+    monkeypatch.setattr(extractor, "extract", fake_extract)
+    r = client.post("/api/imports", files={"files": ("foto.png", _png(png_color), "image/png")})
+    assert r.status_code == 202, r.text
+    return wait_for(client, r.json()["id"])
+
+
+def _payload(imp, **overrides):
+    keys = ("date", "description", "merchant", "amount_cents", "category", "installment", "notes")
+    return [{**{k: t[k] for k in keys}, **overrides} for t in imp["transactions"]]
+
+
+def test_concurrent_confirms_import_only_once(client, monkeypatch):
+    import threading
+
+    imp = _import(client, monkeypatch)
+    body = {"source": "Nubank", "transactions": _payload(imp)}
+    codes = []
+    threads = [threading.Thread(target=lambda: codes.append(client.post(f"/api/imports/{imp['id']}/confirm", json=body).status_code)) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(codes) == [200, 409, 409, 409]
+    assert len(client.get("/api/transactions").json()) == 2
+
+
+def test_corrected_category_is_remembered_for_next_statement(client, monkeypatch):
+    first = _import(client, monkeypatch, "white")
+    assert all(t["category_source"] == "claude" for t in first["transactions"])
+    txs = _payload(first)
+    txs[0].update(category="lazer", remember=True)  # iFood corrected by the couple
+    assert client.post(f"/api/imports/{first['id']}/confirm", json={"transactions": txs}).status_code == 200
+
+    second = _import(client, monkeypatch, "black")
+    ifood, magalu = second["transactions"]
+    assert (ifood["category"], ifood["category_source"]) == ("lazer", "rule")
+    assert (magalu["category"], magalu["category_source"]) == ("casa", "claude")
+
+
+def test_recategorize_applies_to_similar_and_is_remembered(client):
+    ids = []
+    for day, desc in (("01", "POSTO SHELL 123"), ("08", "POSTO SHELL 456"), ("15", "Padaria")):
+        r = client.post("/api/transactions", json={"date": f"2026-09-{day}", "description": desc, "merchant": "Posto Shell" if "SHELL" in desc else "",
+                                                   "amount_cents": 15000, "category": "transporte"})
+        ids.append(r.json()["id"])
+
+    similar = client.get(f"/api/transactions/{ids[0]}/similar").json()["similar"]
+    assert [s["id"] for s in similar] == [ids[1]]
+
+    tx = client.get("/api/transactions").json()
+    first = next(t for t in tx if t["id"] == ids[0])
+    r = client.put(f"/api/transactions/{ids[0]}?apply_to_similar=true", json={**first, "category": "casa"})
+    assert r.json()["updated_similar"] == 1
+    cats = {t["id"]: t["category"] for t in client.get("/api/transactions").json()}
+    assert cats == {ids[0]: "casa", ids[1]: "casa", ids[2]: "transporte"}
+
+    from app import db, rules
+
+    with db.session() as conn:
+        assert rules.lookup(conn, "POSTO SHELL 999", "") == "casa"
+        assert rules.lookup(conn, "", "posto shell") == "casa"
+
+
+def test_installment_validation(client):
+    base = {"date": "2026-09-10", "description": "Compra", "amount_cents": 1000, "category": "compras"}
+    assert client.post("/api/transactions", json={**base, "installment": "0/10"}).status_code == 422
+    assert client.post("/api/transactions", json={**base, "installment": "11/10"}).status_code == 422
+    assert client.post("/api/transactions", json={**base, "installment": "1/1"}).json()["installment"] is None
+    assert client.post("/api/transactions", json={**base, "description": "   "}).status_code == 422
+
+
+def test_daily_backup(client, tmp_path):
+    from app import config, db
+
+    backups = list((config.DATA_DIR / "backups").glob("gastos-*.db"))
+    assert len(backups) == 1  # made at startup
+    for i in range(20):
+        (config.DATA_DIR / "backups" / f"gastos-2020-01-{i + 1:02d}.db").write_bytes(b"")
+    backups[0].unlink()
+    db.backup_daily()
+    assert len(list((config.DATA_DIR / "backups").glob("gastos-*.db"))) == db.BACKUPS_TO_KEEP

@@ -14,9 +14,9 @@ from typing import Literal
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import config, db, documents, extractor
+from . import config, db, documents, extractor, rules
 from .categories import CATEGORIES, CATEGORY_KEYS
 
 CategoryKey = Literal[tuple(CATEGORY_KEYS)]  # type: ignore[valid-type]
@@ -25,6 +25,7 @@ CategoryKey = Literal[tuple(CATEGORY_KEYS)]  # type: ignore[valid-type]
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     db.init()
+    db.backup_daily()
     # Extractions interrupted by a restart will never finish.
     with db.session() as conn:
         conn.execute(
@@ -56,6 +57,8 @@ async def password_guard(request: Request, call_next):
 
 
 class TransactionIn(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     date: Date
     description: str = Field(min_length=1, max_length=300)
     merchant: str = Field(default="", max_length=200)
@@ -77,15 +80,27 @@ class TransactionIn(BaseModel):
     def installment_format(cls, v: str | None) -> str | None:
         if not v:
             return None
-        m = re.fullmatch(r"\s*0*(\d+)\s*/\s*0*(\d+)\s*", v)
+        m = re.fullmatch(r"0*(\d+)\s*/\s*0*(\d+)", v)
         if not m:
             raise ValueError("Parcela deve estar no formato 3/10.")
-        return f"{int(m.group(1))}/{int(m.group(2))}"
+        k, n = int(m.group(1)), int(m.group(2))
+        if n < 2:
+            return None
+        if not 1 <= k <= n:
+            raise ValueError("Parcela inválida: o número da parcela deve ficar entre 1 e o total.")
+        return f"{k}/{n}"
+
+
+class ImportTransactionIn(TransactionIn):
+    # True when the couple changed the category Claude suggested: remember it.
+    remember: bool = False
 
 
 class ImportConfirm(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     source: str = Field(default="", max_length=100)
-    transactions: list[TransactionIn]
+    transactions: list[ImportTransactionIn]
 
 
 def _row(r) -> dict:
@@ -151,26 +166,50 @@ def create_transaction(t: TransactionIn):
 
 
 @app.put("/api/transactions/{tx_id}")
-def update_transaction(tx_id: int, t: TransactionIn):
+def update_transaction(tx_id: int, t: TransactionIn, apply_to_similar: bool = False):
+    if apply_to_similar:
+        db.backup_daily()
     with db.session() as conn:
-        cur = conn.execute(
+        old = conn.execute("SELECT * FROM transactions WHERE id = ?", (tx_id,)).fetchone()
+        if not old:
+            raise HTTPException(404, "Lançamento não encontrado.")
+        conn.execute(
             """UPDATE transactions SET date = ?, description = ?, merchant = ?, amount_cents = ?,
                category = ?, source = ?, installment = ?, notes = ? WHERE id = ?""",
             (
                 t.date.isoformat(),
-                t.description.strip(),
-                t.merchant.strip(),
+                t.description,
+                t.merchant,
                 t.amount_cents,
                 t.category,
-                t.source.strip(),
+                t.source,
                 t.installment,
-                t.notes.strip(),
+                t.notes,
                 tx_id,
             ),
         )
-        if cur.rowcount == 0:
+        updated_similar = 0
+        if old["category"] != t.category:
+            # A correction: remember it for future statements.
+            rules.learn(conn, t.description, t.merchant, t.category)
+            if apply_to_similar:
+                for r in rules.similar(conn, old["description"], old["merchant"], tx_id):
+                    if r["category"] != t.category:
+                        conn.execute("UPDATE transactions SET category = ? WHERE id = ?", (t.category, r["id"]))
+                        updated_similar += 1
+        row = _row(conn.execute("SELECT * FROM transactions WHERE id = ?", (tx_id,)).fetchone())
+    return {**row, "updated_similar": updated_similar}
+
+
+@app.get("/api/transactions/{tx_id}/similar")
+def similar_transactions(tx_id: int):
+    """Other transactions from the same place, for "apply to all" when recategorizing."""
+    with db.session() as conn:
+        tx = conn.execute("SELECT description, merchant FROM transactions WHERE id = ?", (tx_id,)).fetchone()
+        if not tx:
             raise HTTPException(404, "Lançamento não encontrado.")
-        return _row(conn.execute("SELECT * FROM transactions WHERE id = ?", (tx_id,)).fetchone())
+        found = rules.similar(conn, tx["description"], tx["merchant"], tx_id)
+    return {"similar": [{"id": r["id"], "category": r["category"]} for r in found]}
 
 
 @app.delete("/api/transactions/{tx_id}", status_code=204)
@@ -238,6 +277,12 @@ def _run_extraction(import_id: int, uploads: list[documents.Upload], password: s
         message = f"Erro inesperado: {exc}"
     else:
         with db.session() as conn:
+            # Categories the couple corrected before win over Claude's guess.
+            for t in result["transactions"]:
+                remembered = rules.lookup(conn, t["description"], t["merchant"])
+                t["category_source"] = "rule" if remembered else "claude"
+                if remembered:
+                    t["category"] = remembered
             conn.execute(
                 """UPDATE imports SET status = 'review', issuer = ?, reference_month = ?, due_date = ?,
                    statement_total_cents = ?, extracted_json = ?, input_tokens = ?, output_tokens = ?, model = ?
@@ -271,12 +316,14 @@ async def create_import(
     password: str = Form(""),
 ):
     uploads = []
+    total = 0
     for f in files:
         data = await f.read()
         if not data:
             continue
-        if len(data) > 30_000_000:
-            raise HTTPException(413, f"'{f.filename}' tem mais de 30 MB.")
+        total += len(data)
+        if len(data) > 30_000_000 or total > 100_000_000:
+            raise HTTPException(413, "Arquivos grandes demais. Envie a fatura em PDF ou menos fotos por vez.")
         uploads.append(documents.Upload(f.filename or "arquivo", f.content_type or "", data))
     if not uploads:
         raise HTTPException(400, "Nenhum arquivo enviado.")
@@ -348,21 +395,29 @@ def get_import(import_id: int):
 @app.post("/api/imports/{import_id}/confirm")
 def confirm_import(import_id: int, body: ImportConfirm):
     with db.session() as conn:
-        row = conn.execute("SELECT status FROM imports WHERE id = ?", (import_id,)).fetchone()
-        if not row:
-            raise HTTPException(404, "Importação não encontrada.")
-        if row["status"] != "review":
-            raise HTTPException(409, "Esta importação não está aguardando revisão.")
+        # Take the write lock first: if both of you confirm the same statement at the
+        # same time, only one of the confirmations goes through.
+        conn.execute("BEGIN IMMEDIATE")
+        claimed = conn.execute(
+            "UPDATE imports SET status = 'confirmed', source = ? WHERE id = ? AND status = 'review'",
+            (body.source, import_id),
+        ).rowcount
+        if not claimed:
+            if not conn.execute("SELECT 1 FROM imports WHERE id = ?", (import_id,)).fetchone():
+                raise HTTPException(404, "Importação não encontrada.")
+            raise HTTPException(409, "Esta fatura já foi importada (ou descartada) em outro aparelho.")
         for t in body.transactions:
             if not t.source:
                 t.source = body.source
             _insert_transaction(conn, t, "import", import_id)
-        conn.execute("UPDATE imports SET status = 'confirmed', source = ? WHERE id = ?", (body.source.strip(), import_id))
+            if t.remember:
+                rules.learn(conn, t.description, t.merchant, t.category)
     return {"imported": len(body.transactions)}
 
 
 @app.delete("/api/imports/{import_id}", status_code=204)
 def delete_import(import_id: int):
+    db.backup_daily()
     with db.session() as conn:
         if conn.execute("DELETE FROM imports WHERE id = ?", (import_id,)).rowcount == 0:
             raise HTTPException(404, "Importação não encontrada.")

@@ -52,11 +52,14 @@ def main() -> None:
                     amount = round(rng.uniform(lo, hi), 2)
                     rows.append((day.isoformat(), name.upper(), name, int(amount * 100), cat, rng.choice(["Nubank", "Itaú Visa"]), None))
             d = month_end + timedelta(days=1)
-        # Installment purchases still running
+        # Installment purchases still running: one installment on the 1st of each month, the
+        # latest one this month (the 1st is never in the future).
         for name, cat, total_n, paid, value in (("Magazine Luiza - Geladeira", "casa", 10, 6, 389.9), ("Decolar - Passagens", "lazer", 6, 2, 412.5), ("Apple - iPhone", "compras", 12, 9, 541.58)):
             for k in range(1, paid + 1):
-                month = today.replace(day=5) - timedelta(days=31 * (paid - k))
-                rows.append((month.isoformat(), f"{name.upper()} PARC {k:02d}/{total_n:02d}", name, int(value * 100), cat, "Nubank", f"{k}/{total_n}"))
+                back = paid - k
+                year, month = divmod(today.year * 12 + today.month - 1 - back, 12)
+                day = date(year, month + 1, 1)
+                rows.append((day.isoformat(), f"{name.upper()} PARC {k:02d}/{total_n:02d}", name, int(value * 100), cat, "Nubank", f"{k}/{total_n}"))
         conn.executemany(
             "INSERT INTO transactions (date, description, merchant, amount_cents, category, source, installment, origin) VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')",
             rows,
