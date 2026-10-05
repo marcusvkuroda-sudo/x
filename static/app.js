@@ -30,10 +30,12 @@
     files: [],
     review: {}, // import id -> { source, rows }
     lastUploadId: null,
+    lastFiles: [],
     editing: null,
     formCat: "mercado",
     similar: null, // transactions from the same place as the one being edited
     txLimit: TX_PAGE,
+    basis: "bill", // "bill": month of the statement · "purchase": purchase date
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -185,7 +187,7 @@
   // open on the latest month with data instead of an empty screen.
   function autoPeriod() {
     const current = monthKey(today());
-    const months = [...new Set(state.txs.map((t) => t.date.slice(0, 7)))].filter((m) => m <= current).sort();
+    const months = [...new Set(state.txs.map(monthOf))].filter((m) => m <= current).sort();
     if (!months.length || months.includes(current)) {
       state.preset = "this_month";
       state.month = null;
@@ -212,7 +214,7 @@
       prevStart = addMonths(start, -1);
       prevEnd = addMonths(t, -1);
       label = `Gasto em ${MONTHS[t.getMonth()]}`;
-      prevLabel = "mesmo período do mês passado";
+      prevLabel = state.basis === "bill" ? MONTHS[prevStart.getMonth()] : "mesmo período do mês passado";
     } else if (p === "last_month") {
       start = addMonths(startOfMonth(t), -1);
       end = endOfMonth(start);
@@ -252,7 +254,15 @@
     return { start, end, prevStart, prevEnd, label, prevLabel };
   }
 
+  // Which month an entry counts in: by default the month of the statement it was charged on
+  // (so a month's total matches the bank's statement); optionally the purchase date.
+  const monthOf = (t) => (state.basis === "bill" ? t.bill_month || t.date.slice(0, 7) : t.date.slice(0, 7));
+
   const inRange = (tx, a, b) => {
+    if (state.basis === "bill") {
+      const m = monthOf(tx);
+      return m >= monthKey(a) && m <= monthKey(b);
+    }
     const d = tx.date;
     return d >= iso(a) && d <= iso(b);
   };
@@ -266,7 +276,26 @@
       )
     );
 
-    const months = [...new Set(state.txs.map((t) => t.date.slice(0, 7)))].sort().reverse();
+    $("#basis-seg").replaceChildren(
+      ...[
+        ["bill", "🧾 Mês da fatura"],
+        ["purchase", "🛒 Data da compra"],
+      ].map(([key, label]) =>
+        h("button", {
+          type: "button",
+          "aria-pressed": String(state.basis === key),
+          text: label,
+          title: key === "bill" ? "Cada compra conta no mês da fatura em que foi cobrada: o total do mês bate com a fatura" : "Cada compra conta no mês em que foi feita",
+          onclick: () => {
+            state.basis = key;
+            store.set("basis", key);
+            renderDashboard();
+          },
+        })
+      )
+    );
+
+    const months = [...new Set(state.txs.map(monthOf))].sort().reverse();
     const ms = $("#month-select");
     ms.replaceChildren(h("option", { value: "", text: "📅 Escolher mês…" }), ...months.map((m) => h("option", { value: m, text: cap(monthLabel(m)) })));
     ms.value = state.preset === "month" ? state.month : "";
@@ -344,7 +373,7 @@
     for (let i = nMonths - 1; i >= 0; i--) monthKeys.push(monthKey(addMonths(endMonth, -i)));
     const byMonth = Object.fromEntries(monthKeys.map((k) => [k, {}]));
     for (const t of scoped) {
-      const k = t.date.slice(0, 7);
+      const k = monthOf(t);
       if (byMonth[k]) byMonth[k][t.category] = (byMonth[k][t.category] || 0) + t.amount_cents;
     }
     const startKey = monthKey(period.start);
@@ -367,20 +396,33 @@
     window.Charts.sparkline($("#kpi-spark"), months.slice(-12).map((m) => m.total), "var(--accent)");
 
     // Average. A month still in progress would drag the monthly average down, so it is left out.
-    const elapsedEnd = period.end > t0 ? t0 : period.end;
+    // By statement month, a month counts whole (its statement is already closed when imported).
+    const bill = state.basis === "bill";
+    // By statement month, purchases spread over the statement's own dates (part of them in the
+    // month before): the calendar and the daily average use those dates.
+    const purchaseSpan = (() => {
+      if (!bill || !inPeriod.length) return { start: period.start, end: period.end };
+      const dates = inPeriod.map((t) => t.date).sort();
+      return { start: parseDate(dates[0]), end: parseDate(dates[dates.length - 1]) };
+    })();
+    const lastDay = bill ? endOfMonth(t0) : t0;
+    const elapsedEnd = period.end > lastDay ? lastDay : period.end;
     const days = Math.max(1, Math.round((elapsedEnd - period.start) / 864e5) + 1);
     const elapsedMonths = monthsSpanned(period.start, elapsedEnd);
     if (elapsedMonths > 1) {
       const currentKey = monthKey(t0);
-      const partial = monthKey(elapsedEnd) === currentKey && t0.getDate() < endOfMonth(t0).getDate();
-      const fullTotal = partial ? total - sum(inPeriod.filter((t) => t.date.startsWith(currentKey))) : total;
+      const partial = !bill && monthKey(elapsedEnd) === currentKey && t0.getDate() < endOfMonth(t0).getDate();
+      const fullTotal = partial ? total - sum(inPeriod.filter((t) => monthOf(t) === currentKey)) : total;
       $("#kpi-avg-label").textContent = "Média por mês";
       $("#kpi-avg").textContent = fmt(Math.round(fullTotal / (partial ? elapsedMonths - 1 : elapsedMonths)));
       $("#kpi-avg-sub").textContent = partial ? `sem contar ${MONTHS[t0.getMonth()]}, ainda em andamento` : `≈ ${fmt(Math.round(total / days))} por dia`;
     } else {
+      const spanDays = bill ? Math.round((purchaseSpan.end - purchaseSpan.start) / 864e5) + 1 : days;
       $("#kpi-avg-label").textContent = "Média por dia";
-      $("#kpi-avg").textContent = fmt(Math.round(total / days));
-      $("#kpi-avg-sub").textContent = `em ${plural(days, "dia", "dias")}`;
+      $("#kpi-avg").textContent = fmt(Math.round(total / spanDays));
+      $("#kpi-avg-sub").textContent = bill
+        ? `${plural(spanDays, "dia", "dias")} de compras (${purchaseSpan.start.toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })} a ${purchaseSpan.end.toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })})`
+        : `em ${plural(days, "dia", "dias")}`;
     }
 
     // Categories (ignore the category filter so the whole picture stays visible)
@@ -465,7 +507,7 @@
 
     // ---- Monthly chart (after the category card, whose height it matches)
     const shownCats = cats.filter((c) => !state.cat || c.key === state.cat).map((c) => ({ ...c, color: catColor(c.key) }));
-    $("#monthly-sub").textContent = state.cat ? `${cmap[state.cat].label}, mês a mês` : `Gastos por categoria, ${nMonths} meses · toque num mês para ver só ele`;
+    $("#monthly-sub").textContent = state.cat ? `${cmap[state.cat].label}, mês a mês` : `Gastos por categoria, ${nMonths} meses ${bill ? "(pelo mês da fatura)" : "(pela data da compra)"} · toque num mês para ver só ele`;
     window.Charts.stackedColumns($("#chart-monthly"), { months, cats: shownCats, onClick: (k) => choosePeriod("month", k) });
     $("#legend-monthly").replaceChildren(
       ...shownCats.filter((c) => months.some((m) => m.values[c.key])).map((c) => h("span", {}, h("i", { style: `background:${c.color}` }), c.label))
@@ -478,14 +520,15 @@
       daily.set(t.date, (daily.get(t.date) || 0) + t.amount_cents);
       counts.set(t.date, (counts.get(t.date) || 0) + 1);
     }
-    const heat = window.Charts.calendarHeatmap($("#chart-heat"), $("#heat-legend"), { start: period.start, end: period.end, daily, counts });
+    const { start: heatStart, end: heatEnd } = purchaseSpan;
+    const heat = window.Charts.calendarHeatmap($("#chart-heat"), $("#heat-legend"), { start: heatStart, end: heatEnd, daily, counts });
     $("#heat-sub").textContent = heat.truncated ? "Últimos 12 meses do período · quanto mais escuro, mais gastamos" : "Quanto mais escuro, mais gastamos no dia";
 
     // ---- Weekday averages
     const wdTotals = [0, 0, 0, 0, 0, 0, 0];
     const wdDays = [0, 0, 0, 0, 0, 0, 0];
     const wdActive = [0, 0, 0, 0, 0, 0, 0];
-    for (let d = new Date(period.start); d <= elapsedEnd; d.setDate(d.getDate() + 1)) wdDays[d.getDay()]++;
+    for (let d = new Date(heatStart); d <= (heatEnd > t0 ? t0 : heatEnd); d.setDate(d.getDate() + 1)) wdDays[d.getDay()]++;
     for (const [k, v] of daily) {
       const wd = parseDate(k).getDay();
       wdTotals[wd] += v;
@@ -850,17 +893,38 @@
     try {
       const res = await api("/api/imports", { method: "POST", body: fd });
       state.lastUploadId = res.id;
+      state.lastFiles = state.files;
       state.files = [];
-      $("#import-password").value = "";
       renderFiles();
       await loadImports();
+      settleUpload();
       renderImport();
-      startPolling();
+      if (state.imports.some((i) => i.status === "processing")) startPolling();
     } catch (ex) {
       errEl.textContent = ex.message;
       errEl.hidden = false;
       btn.disabled = false;
     }
+  }
+
+  // The free reader usually finishes before the first poll: report the outcome of the last
+  // upload as soon as it is known. On error the files and password stay, ready to retry.
+  function settleUpload() {
+    const last = state.imports.find((i) => i.id === state.lastUploadId);
+    if (!last || last.status === "processing") return false;
+    if (last.status === "error") {
+      $("#upload-error").textContent = last.error;
+      $("#upload-error").hidden = false;
+      state.files = state.lastFiles || [];
+      renderFiles();
+      if (/senha/i.test(last.error)) $("#import-password").focus();
+    } else {
+      $("#import-password").value = "";
+      if (last.status === "review") toast("Fatura lida! Confira os lançamentos 👀");
+    }
+    state.lastUploadId = null;
+    state.lastFiles = [];
+    return true;
   }
 
   let pollTimer = null;
@@ -871,14 +935,7 @@
         const before = state.imports.filter((i) => i.status === "processing").map((i) => i.id);
         await loadImports();
         const changed = before.some((id) => state.imports.find((i) => i.id === id)?.status !== "processing");
-        if (changed) {
-          const last = state.imports.find((i) => i.id === state.lastUploadId);
-          if (last && last.status === "error") {
-            $("#upload-error").textContent = last.error;
-            $("#upload-error").hidden = false;
-          } else if (last && last.status === "review") {
-            toast("Fatura lida! Confira os lançamentos 👀");
-          }
+        if (settleUpload() || changed) {
           if (state.view === "import") renderImport();
         }
         if (!state.imports.some((i) => i.status === "processing")) {
@@ -1255,6 +1312,7 @@
 
   async function boot() {
     applyTheme(store.get("theme"));
+    state.basis = store.get("basis") === "purchase" ? "purchase" : "bill";
     bind();
     await Promise.all([loadMeta(), loadTxs(), loadImports()]);
     if (state.imports.some((i) => i.status === "processing")) startPolling();

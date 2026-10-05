@@ -15,6 +15,9 @@ Wi-Fi. Os dados ficam só nesse computador, na pasta `data/`.
   - Calendário de calor dos dias, média por dia da semana e top estabelecimentos.
   - Parcelas que ainda vão vencer.
   - Filtros por período, mês, categoria e cartão, e modo escuro.
+  - **Mês da fatura** (padrão) ou **data da compra**: no primeiro, cada lançamento importado conta no
+    mês de vencimento da sua fatura, então o total do mês bate exatamente com a fatura do banco; no
+    segundo, conta no mês em que a compra foi feita.
   - Quando o mês atual ainda não tem gastos (a fatura só chega depois), o painel abre no último mês que tem dados.
 - **Importar fatura (gratuito)**: envie o PDF da fatura baixado do app ou site do banco (inclusive
   os protegidos por senha), ou o arquivo CSV/OFX que o banco exporta.
@@ -89,6 +92,10 @@ python run.py
 - **PDF do banco**: funciona com faturas geradas pelo banco (que têm texto dentro). PDFs escaneados ou
   fotos não têm texto: para esses, exporte CSV/OFX ou use a dica do Claude abaixo.
 - **CSV/OFX**: o jeito mais preciso. O Nubank, por exemplo, exporta a fatura em CSV no app e no site.
+- **Senha do PDF**: normalmente são os primeiros dígitos do CPF do titular. O app perdoa espaços e
+  pontos digitados a mais, e abre sem senha os PDFs que só bloqueiam impressão.
+- **Faturas em duas colunas** e com colunas de parcela e de US$ (como a do Santander) são lidas coluna
+  por coluna, sempre pelo valor em R$.
 - **Algum banco não funcionou?** Cada banco monta o PDF de um jeito; o leitor é genérico. Avise qual
   banco e ajustamos o código.
 - **Fotos, sem pagar nada**: envie a foto ou PDF numa conversa no claude.ai (assinatura Pro) pedindo

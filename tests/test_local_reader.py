@@ -180,3 +180,126 @@ def test_free_reader_through_the_api(client, monkeypatch):
     assert imp["status"] == "review", imp.get("error")
     assert len(imp["transactions"]) == 7 and imp["model"] == "local" and imp["cost_usd"] is None
     assert client.get("/api/meta").json()["reader"] == "local"
+
+
+# ---------------------------------------------------------------- Santander-like statement
+
+# (date, description, installment, R$ value, US$ value) — what the statement really charges.
+SANTANDER_CHARGES = [
+    ("02/09", "PAO DE ACUCAR 1234", "", "412,37", ""),
+    ("03/09", "DROGASIL 0451", "", "76,50", ""),
+    ("12/09", "UBER *TRIP", "", "23,40", ""),
+    ("15/09", "IFD*PIZZARIA BELLA", "", "89,90", ""),
+    ("14/06", "MERCADOLIVRE*LOJA", "04/10", "120,00", ""),
+    ("18/09", "AMAZON MARKETPLACE", "", "65,10", "12,99"),
+    ("18/09", "IOF DESPESA NO EXTERIOR", "", "2,28", ""),
+    ("20/09", "POSTO SHELL", "", "200,00", ""),
+    ("21/09", "NETFLIX.COM", "", "55,90", ""),
+    ("08/07", "ANUIDADE DIFERENCIADA", "03/12", "39,90", ""),
+    ("25/09", "ESTORNO DE COMPRA", "", "-25,00", ""),
+    ("26/09", "SMART FIT", "", "129,90", ""),
+    ("27/09", "OUTBACK STEAKHOUSE", "", "248,70", ""),
+    ("28/09", "SEM PARAR", "", "47,35", ""),
+]
+
+
+def santander_pdf(password: str | None = "12345") -> tuple[bytes, int]:
+    """Two columns of transactions per page, with Parcela, R$ and US$ columns. Returns (pdf, total cents)."""
+    total = sum(int(v.replace(".", "").replace(",", "")) for *_, v, _ in SANTANDER_CHARGES)
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4, encrypt=None)
+    if password:
+        from reportlab.lib.pdfencrypt import StandardEncryption
+
+        c = canvas.Canvas(buf, pagesize=A4, encrypt=StandardEncryption(password, ownerPassword="banco", strength=128))
+    c.setFont("Helvetica", 7)
+    brl = f"{total / 100:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    y = 810
+    for text in ("Santander", "Fatura do Cartão SANTANDER SX VISA", f"Vencimento 10/10/2026     Total a Pagar R$ {brl}",
+                 "Saldo anterior 1.500,00", "Detalhamento da Fatura", "MARCUS V KURODA - 4220 XXXX XXXX 1234"):
+        c.drawString(40, y, text)
+        y -= 12
+    columns = (40, 310)
+
+    def row(x, cells):
+        for dx, cell in zip((0, 30, 150, 185, 230), cells):
+            if cell:
+                c.drawString(x + dx, y, cell)
+
+    for x in columns:
+        row(x, ("Data", "Descrição", "Parcela", "R$", "US$"))
+    y -= 12
+    row(columns[0], ("05/09", "PAGAMENTO DE FATURA-INTERNET", "", "-1.500,00", ""))
+    lines = SANTANDER_CHARGES[:]
+    half = (len(lines) + 1) // 2
+    left, right = lines[:half], lines[half:]
+    row(columns[1], right[0])
+    y -= 12
+    for i, item in enumerate(left):
+        row(columns[0], item)
+        if i + 1 < len(right):
+            row(columns[1], right[i + 1])
+        y -= 12
+    c.drawString(40, y, "Compras parceladas - próximas faturas")
+    y -= 12
+    row(columns[0], ("14/06", "MERCADOLIVRE*LOJA", "05/10", "120,00", ""))
+    c.showPage()
+    c.save()
+    return buf.getvalue(), total
+
+
+def test_santander_like_two_columns_with_password():
+    data, total = santander_pdf("12345")
+    with pytest.raises(documents.DocumentError, match="senha"):
+        local_reader.read([documents.Upload("fatura.pdf", "application/pdf", data)], "")
+    r = local_reader.read([documents.Upload("fatura.pdf", "application/pdf", data)], " 12345 ")
+    assert r["issuer"] == "Santander" and r["due_date"] == "2026-10-10"
+    got = sorted((t["description"], t["amount_cents"]) for t in r["transactions"])
+    want = sorted((d if not p else f"{d} {p}", int(v.replace(",", "").replace(".", ""))) for _, d, p, v, _ in SANTANDER_CHARGES)
+    assert got == want  # each column read separately, R$ value (not US$), payment and future installment left out
+    assert sum(t["amount_cents"] for t in r["transactions"]) == r["statement_total_cents"] == total
+    by = {t["description"]: t for t in r["transactions"]}
+    assert by["MERCADOLIVRE*LOJA 04/10"]["installment"] == "4/10"
+    assert by["MERCADOLIVRE*LOJA 04/10"]["date"] == "2026-09-30"
+    assert by["ESTORNO DE COMPRA"]["amount_cents"] == -2500
+    assert by["AMAZON MARKETPLACE"]["amount_cents"] == 6510
+
+
+@pytest.mark.parametrize("typed", ["12345", " 12345 ", "123.45", "senha-errada-mas-pdf-abre-sem-senha"])
+def test_password_slips_are_forgiven(typed):
+    from pypdf import PdfReader, PdfWriter
+
+    plain, _ = santander_pdf(None)
+    w = PdfWriter(clone_from=PdfReader(io.BytesIO(plain)))
+    # The last case: a PDF that only restricts printing (no password to open it).
+    user = "" if typed.startswith("senha") else "12345"
+    w.encrypt(user_password=user, owner_password="banco", algorithm="AES-256")
+    out = io.BytesIO()
+    w.write(out)
+    r = local_reader.read([documents.Upload("f.pdf", "application/pdf", out.getvalue())], typed)
+    assert len(r["transactions"]) == len(SANTANDER_CHARGES)
+
+
+def test_minus_inside_description_is_not_a_refund():
+    (rec,) = local_reader._records("12 JUN Samsung - Parcela 4/10 R$ 299,90")
+    assert rec["amounts"] == [29990] and rec["installment"] == "4/10"
+
+
+def test_statement_month_comes_with_each_transaction(client, monkeypatch):
+    from app import config
+
+    monkeypatch.setattr(config, "EXTRACTION_MODE", "local")
+    data, total = santander_pdf("12345")
+    r = client.post("/api/imports", files={"files": ("fatura.pdf", data, "application/pdf")}, data={"password": "12345"})
+    for _ in range(100):
+        imp = client.get(f"/api/imports/{r.json()['id']}").json()
+        if imp["status"] != "processing":
+            break
+        time.sleep(0.05)
+    payload = [{k: t[k] for k in ("date", "description", "merchant", "amount_cents", "category", "installment", "notes")} for t in imp["transactions"]]
+    client.post(f"/api/imports/{imp['id']}/confirm", json={"source": "Santander", "transactions": payload})
+    client.post("/api/transactions", json={"date": "2026-09-15", "description": "Feira", "amount_cents": 3000, "category": "mercado"})
+    txs = client.get("/api/transactions").json()
+    assert {t["bill_month"] for t in txs if t["origin"] == "import"} == {"2026-10"}
+    assert next(t["bill_month"] for t in txs if t["origin"] == "manual") == "2026-09"
+    assert sum(t["amount_cents"] for t in txs if t["bill_month"] == "2026-10") == total

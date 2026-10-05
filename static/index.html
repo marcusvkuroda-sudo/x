@@ -31,6 +31,7 @@
     <section id="view-dashboard" hidden>
       <div class="filters">
         <div class="seg" id="period-seg" role="group" aria-label="Período"></div>
+        <div class="seg" id="basis-seg" role="group" aria-label="Contar gastos por"></div>
         <select class="input" id="month-select" aria-label="Escolher mês"></select>
         <select class="input" id="source-select" aria-label="Cartão ou conta" hidden></select>
       </div>
@@ -175,7 +176,7 @@
               </label>
               <label class="field">
                 <span>Senha do PDF (se houver)</span>
-                <input class="input" id="import-password" type="password" autocomplete="off" placeholder="geralmente dígitos do CPF">
+                <input class="input" id="import-password" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="geralmente dígitos do CPF">
                 <small>Usada só para abrir o arquivo, não é salva.</small>
               </label>
             </div>

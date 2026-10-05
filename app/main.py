@@ -6,6 +6,7 @@ import json
 import re
 import secrets
 import shutil
+import traceback
 from contextlib import asynccontextmanager
 from datetime import date as Date
 from typing import Literal
@@ -154,7 +155,14 @@ def meta():
 @app.get("/api/transactions")
 def list_transactions():
     with db.session() as conn:
-        rows = conn.execute("SELECT * FROM transactions ORDER BY date DESC, id DESC").fetchall()
+        # bill_month: the month of the statement an entry was charged on (its due month), so the
+        # dashboard can add things up exactly like the bank's statements. Manual entries count
+        # in the month of their own date.
+        rows = conn.execute(
+            """SELECT t.*, COALESCE(i.reference_month, substr(t.date, 1, 7)) AS bill_month
+               FROM transactions t LEFT JOIN imports i ON i.id = t.import_id
+               ORDER BY t.date DESC, t.id DESC"""
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -278,7 +286,8 @@ def _run_extraction(import_id: int, uploads: list[documents.Upload], password: s
     except (documents.DocumentError, extractor.ExtractionError) as exc:
         message = str(exc)
     except Exception as exc:  # keep the import visible instead of stuck in "processing"
-        message = f"Erro inesperado: {exc}"
+        traceback.print_exc()  # shows up in the app's window, handy to report a bug
+        message = f"Erro inesperado ao ler a fatura ({type(exc).__name__}: {exc}). Se repetir, mande um print da janela preta."
     else:
         with db.session() as conn:
             # Categories the couple corrected before win over Claude's guess.

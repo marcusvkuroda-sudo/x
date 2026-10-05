@@ -54,6 +54,8 @@ _RAW_RULES = [(re.compile(r"\b99\s*(app|pop|taxi|tecnologia|food)", re.IGNORECAS
 # Payment processors print a prefix before the real merchant name.
 _PREFIXES = re.compile(r"^(ifd|pg|pag|mp|ec|ppro|pagseguro|pagbank|ebanx|dl|sumup|iz|pp|ame|picpay)\s*\*\s*", re.IGNORECASE)
 
+_CONNECTORS = {"de", "da", "do", "das", "dos", "e", "em", "na", "no"}
+
 _BRANDS = [
     ("ifd", "iFood"), ("ifood", "iFood"), ("uber", "Uber"), ("netflix", "Netflix"), ("spotify", "Spotify"),
     ("amazon prime", "Amazon Prime"), ("amazonprime", "Amazon Prime"), ("amazon", "Amazon"), ("amzn", "Amazon"),
@@ -89,4 +91,8 @@ def clean_merchant(description: str) -> str:
             return brand
     text = _PREFIXES.sub("", text).strip(" *-")
     text = re.sub(r"(\s+[\d\-/.]+)+$", "", text) or text  # store codes: "DROGASIL 0451"
-    return text.title() if text.isupper() or text.islower() else text
+    if not (text.isupper() or text.islower()):
+        return text
+    words = text.title().split(" ")
+    # "PAO DE ACUCAR" -> "Pao de Acucar"
+    return " ".join(w.lower() if i and w.lower() in _CONNECTORS else w for i, w in enumerate(words))

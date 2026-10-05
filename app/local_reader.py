@@ -22,13 +22,7 @@ MONTHS = {"jan": 1, "fev": 2, "feb": 2, "mar": 3, "abr": 4, "apr": 4, "mai": 5, 
           "ago": 8, "aug": 8, "set": 9, "sep": 9, "out": 10, "oct": 10, "nov": 11, "dez": 12, "dec": 12}
 _MONTH_NAMES = "|".join(MONTHS)
 
-# "12/09", "12/09/2026", "12.09.26"
-_NUMERIC_DATE = r"(?P<d>\d{1,2})[/.\-](?P<m>\d{1,2})(?:[/.\-](?P<y>\d{2,4}))?"
-# "12 SET", "12 de set. 2026", "12set"
-_NAMED_DATE = rf"(?P<d2>\d{{1,2}})\s*(?:de\s+)?(?P<mn>{_MONTH_NAMES})[a-zç]*\.?(?:\s*(?:de\s+)?(?P<y2>\d{{4}}))?"
-_AMOUNT = r"(?P<neg>[-−–])?\s*(?:R\$\s*)?(?P<amount>\d{1,3}(?:\.\d{3})*,\d{2})(?P<trail>\s*[-−–]|\s*[CD]\b)?"
 
-LINE = re.compile(rf"^\s*(?:{_NUMERIC_DATE}|{_NAMED_DATE})\s+(?P<desc>.+?)\s+{_AMOUNT}\s*$", re.IGNORECASE)
 INSTALLMENT = re.compile(r"(?:parc(?:ela)?\.?\s*)?\b(\d{1,2})\s*(?:/|de)\s*(\d{1,2})\b(?!.*\b\d{1,2}\s*(?:/|de)\s*\d{1,2}\b)", re.IGNORECASE)
 # "•••• 1234", "**** 1234", "XXXX 1234" (bullets sometimes come out of the PDF as odd symbols)
 CARD_MASK = re.compile(r"(?:(?:[^\w\s]|[xX]){2,}\s*\d{4}\b|final\s+\d{4})", re.IGNORECASE)
@@ -103,6 +97,118 @@ def _pdf_text(upload: documents.Upload, password: str) -> list[str]:
     return pages
 
 
+_DATE_TOKEN = re.compile(r"^(\d{1,2})[/.\-](\d{1,2})(?:[/.\-](\d{2,4}))?$")
+_GLUED_DATE = re.compile(rf"^(\d{{1,2}})({_MONTH_NAMES})[a-zç]*\.?$", re.IGNORECASE)  # "12SET"
+_MONTH_TOKEN = re.compile(rf"^({_MONTH_NAMES})[a-zç]*\.?$", re.IGNORECASE)  # "SET", "set.", "setembro"
+_AMOUNT_TOKEN = re.compile(r"^([-−–])?(?:R\$)?(\d{1,3}(?:\.\d{3})*,\d{2})([-−–]|[CD])?$", re.IGNORECASE)
+_SIGN_TOKENS = {"-", "−", "–", "-r$", "−r$", "–r$"}
+_FOREIGN = {"us$", "usd", "u$", "eur", "€", "eur$"}
+
+
+def _date_at(tokens: list[str], i: int):
+    """A date starting at tokens[i]: ((day, month, year text), tokens used) or (None, 0)."""
+    tok = tokens[i]
+    m = _DATE_TOKEN.match(tok)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), m.group(3)), 1
+    m = _GLUED_DATE.match(tok)
+    if m:
+        return (int(m.group(1)), MONTHS[m.group(2).lower()[:3]], None), 1
+    if re.fullmatch(r"\d{1,2}", tok) and i + 1 < len(tokens):
+        j = i + 1
+        if tokens[j].lower() == "de" and j + 1 < len(tokens):
+            j += 1
+        mm = _MONTH_TOKEN.match(tokens[j])
+        if mm:
+            used = j - i + 1
+            year = None
+            k = j + 1
+            if k < len(tokens) and tokens[k].lower() == "de" and k + 1 < len(tokens):
+                k += 1
+            if k < len(tokens) and re.fullmatch(r"\d{4}", tokens[k]):
+                year, used = tokens[k], k - i + 1
+            return (int(tok), MONTHS[mm.group(1).lower()[:3]], year), used
+    return None, 0
+
+
+def _records(line: str):
+    """Splits one text line into transactions.
+
+    A line may hold one transaction ("12/09 UBER *TRIP 23,40"), several side by side (statements
+    printed in two columns), an installment column ("MAGALU 07/10 389,90") and both a R$ and a
+    US$ amount. Yields dicts with day, month, year, words, installment and amounts (signed cents).
+    """
+    tokens = line.split()
+    cur = None
+    negative_next = False
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        low = tok.lower()
+        when, used = _date_at(tokens, i)
+        if when and (cur is None or cur["amounts"]):
+            if cur:
+                yield cur
+            cur = {"day": when[0], "month": when[1], "year": when[2], "words": [], "amounts": [], "installment": None}
+            negative_next = False
+            i += used
+            continue
+        if cur is None:
+            i += 1
+            continue
+        if when and used == 1 and not cur["amounts"] and cur["words"] and when[2] is None:
+            k, n = when[0], when[1]
+            if 1 <= k <= n and 2 <= n <= 99 and not cur["installment"]:
+                cur["installment"] = f"{k}/{n}"  # installment column ("03/10")
+            cur["words"].append(tok)
+            i += 1
+            continue
+        # A lone "-" is a minus sign only right before the amount ("- 59,90", "-R$ 59,90");
+        # elsewhere it is part of the description ("Samsung - Parcela 4/10").
+        if low in _SIGN_TOKENS and i + 1 < len(tokens) and _AMOUNT_TOKEN.match(tokens[i + 1]):
+            negative_next = True
+            i += 1
+            continue
+        m = _AMOUNT_TOKEN.match(tok)
+        if m and cur["words"]:
+            prev = tokens[i - 1].lower() if i else ""
+            if prev in _FOREIGN and not cur["amounts"]:
+                cur["words"].append(tok)  # "US$ 12,99" inside the description
+            else:
+                cents = _cents(m.group(2))
+                if m.group(1) or negative_next or (m.group(3) or "").upper() in ("-", "−", "–", "C"):
+                    cents = -cents
+                cur["amounts"].append(cents)
+                negative_next = False
+            i += 1
+            continue
+        if low == "r$":
+            i += 1
+            continue
+        if cur["amounts"]:
+            if tok.upper() == "C" and i == len(tokens) - 1:
+                cur["amounts"][-1] = -abs(cur["amounts"][-1])
+            elif tok.upper() != "D":
+                # Text after the amount that isn't a new date: the transaction ended.
+                yield cur
+                cur = None
+            i += 1
+            continue
+        cur["words"].append(tok)
+        i += 1
+    if cur:
+        yield cur
+
+
+def _brl_first(text: str) -> bool | None:
+    """Order of the R$ and US$ columns when the statement has both (from the header line)."""
+    for line in text.splitlines():
+        low = line.lower()
+        if "r$" in low and "us$" in low and not re.search(r"\d,\d{2}", line):
+            return low.index("r$") < low.index("us$")
+    return None
+
+
 def parse_statement_text(pages: list[str], today: date | None = None) -> dict:
     """Finds transactions in the text of a card statement (one string per page)."""
     today = today or date.today()
@@ -110,6 +216,7 @@ def parse_statement_text(pages: list[str], today: date | None = None) -> dict:
     due = _due_date(full)
     ref = due or today
     total = TOTAL.search(full)
+    brl_first = _brl_first(full)
     warnings = []
     transactions = []
     for page in pages:
@@ -119,60 +226,56 @@ def parse_statement_text(pages: list[str], today: date | None = None) -> dict:
                 continue
             if FUTURE.search(line):
                 break  # the rest of this page lists future installments
-            m = LINE.match(line)
-            if not m:
-                continue
-            desc = re.sub(r"\s{2,}", " ", m.group("desc")).strip(" -–")
-            if SKIP.search(desc) or len(desc) < 2:
-                continue
-            if m.group("d"):
-                day, month = int(m.group("d")), int(m.group("m"))
-                year_txt = m.group("y")
-            else:
-                day, month = int(m.group("d2")), MONTHS[m.group("mn").lower()[:3]]
-                year_txt = m.group("y2")
-            if not 1 <= month <= 12:
-                continue
-            # Statements print day/month only: purchases after the due month are from last year.
-            year = _year(year_txt, ref.year - (1 if month > ref.month else 0))
-            tx_date = _safe_date(year, month, day)
-            if not tx_date:
-                continue
+            for rec in _records(line):
+                if not rec["amounts"]:
+                    continue
+                desc = " ".join(rec["words"]).strip(" -–")
+                if SKIP.search(desc) or len(re.sub(r"[^A-Za-zÀ-ú]", "", desc)) < 2:
+                    continue
+                day, month = rec["day"], rec["month"]
+                if not 1 <= month <= 12:
+                    continue
+                # Statements print day/month only: purchases after the due month are from last year.
+                year = _year(rec["year"], ref.year - (1 if month > ref.month else 0))
+                tx_date = _safe_date(year, month, day)
+                if not tx_date:
+                    continue
+                amounts = rec["amounts"]
+                # With R$ and US$ columns, take the R$ one.
+                cents = amounts[0] if len(amounts) > 1 and brl_first else amounts[-1]
+                if REFUND.search(desc):
+                    cents = -abs(cents)
+                if not cents:
+                    continue
 
-            cents = _cents(m.group("amount"))
-            trail = (m.group("trail") or "").strip().upper()
-            if m.group("neg") or trail in ("-", "−", "–", "C") or REFUND.search(desc):
-                cents = -cents
-            if not cents:
-                continue
-
-            notes = []
-            mask = CARD_MASK.search(desc)
-            if mask:
-                notes.append(f"cartão {re.sub(r'[^0-9]', '', mask.group(0))[-4:]}")
-                desc = CARD_MASK.sub("", desc).strip()
-            installment = None
-            inst = INSTALLMENT.search(desc)
-            if inst:
-                k, n = int(inst.group(1)), int(inst.group(2))
-                if 1 <= k <= n and 2 <= n <= 48:
-                    installment = f"{k}/{n}"
+                notes = []
+                mask = CARD_MASK.search(desc)
+                if mask:
+                    notes.append(f"cartão {re.sub(r'[^0-9]', '', mask.group(0))[-4:]}")
+                    desc = CARD_MASK.sub("", desc).strip()
+                installment = rec["installment"]
+                if not installment:
+                    inst = INSTALLMENT.search(desc)
+                    if inst and 1 <= int(inst.group(1)) <= int(inst.group(2)) and 2 <= int(inst.group(2)) <= 99:
+                        installment = f"{int(inst.group(1))}/{int(inst.group(2))}"
+                if installment:
+                    k = int(installment.split("/")[0])
                     charged = due - timedelta(days=10) if due else None  # about the closing date
                     if k >= 2 and charged and tx_date < charged:
                         # Count it in the month it is charged, like the AI reader does.
                         notes.append(f"data da compra: {tx_date.isoformat()}")
                         tx_date = charged
-            transactions.append(
-                {
-                    "date": tx_date.isoformat(),
-                    "description": desc[:300],
-                    "merchant": clean_merchant(desc)[:200],
-                    "amount_cents": cents,
-                    "category": guess_category(desc),
-                    "installment": installment,
-                    "notes": " · ".join(notes),
-                }
-            )
+                transactions.append(
+                    {
+                        "date": tx_date.isoformat(),
+                        "description": desc[:300],
+                        "merchant": clean_merchant(desc)[:200],
+                        "amount_cents": cents,
+                        "category": guess_category(desc),
+                        "installment": installment,
+                        "notes": " · ".join(notes),
+                    }
+                )
 
     if not transactions:
         if not full.strip():

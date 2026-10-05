@@ -8,6 +8,7 @@ actually see, which also covers iPhone HEIC pictures.
 import base64
 import io
 import math
+import re
 from dataclasses import dataclass
 
 from PIL import Image, ImageOps
@@ -51,13 +52,24 @@ def _is_pdf(upload: Upload) -> bool:
     return upload.data[:5] == b"%PDF-" or upload.filename.lower().endswith(".pdf")
 
 
+def _password_candidates(password: str) -> list[str]:
+    """What the person typed, plus the usual slips: spaces around it, a CPF typed with dots
+    and dash, or a password typed for a PDF that only restricts printing and opens without one."""
+    typed = password or ""
+    candidates = [typed, typed.strip(), re.sub(r"\D", "", typed), ""]
+    return list(dict.fromkeys(candidates))
+
+
 def _read_pdf(upload: Upload, password: str) -> tuple[bytes, int]:
     """Returns the PDF bytes (decrypted when needed) and its page count."""
     try:
         reader = PdfReader(io.BytesIO(upload.data))
-        if reader.is_encrypted and not reader.decrypt(password or ""):
+        if reader.is_encrypted and not any(reader.decrypt(p) for p in _password_candidates(password)):
             if password:
-                raise DocumentError(f"Senha incorreta para o PDF '{upload.filename}'.")
+                raise DocumentError(
+                    f"A senha não abriu o PDF '{upload.filename}'. Confira se é a senha da fatura "
+                    "(no Santander e em vários bancos são os 5 ou 6 primeiros dígitos do CPF do titular)."
+                )
             raise DocumentError(
                 f"O PDF '{upload.filename}' é protegido por senha. "
                 "Preencha o campo de senha (normalmente são dígitos do CPF do titular)."
