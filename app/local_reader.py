@@ -30,16 +30,39 @@ CARD_MASK = re.compile(r"(?:(?:[^\w\s]|[xX]){2,}\s*\d{4}\b|final\s+\d{4})", re.I
 # Lines that are not spending: payments of the previous bill, balances, totals, limits.
 SKIP = re.compile(
     r"pagamento|pgto|saldo anterior|saldo em atraso|total d|valor total|total a pagar|subtotal|limite|"
-    r"credito de pagamento|pagto|resumo|vencimento|fechamento|saldo devedor|saldo restante|melhor dia",
+    r"credito de pagamento|pagto|resumo|vencimento|fechamento|saldo devedor|saldo restante|melhor dia|"
+    # automatic debit of the previous bill: "DEB AUTOM DE FATURA EM C/", "DEBITO AUTOMATICO"
+    r"\bdeb\.?\s*autom|d[eé]bito\s+autom|fatura\s+em\s+c",
     re.IGNORECASE,
 )
 # A section listing installments of FUTURE statements: ignore the rest of that page.
 FUTURE = re.compile(r"pr[oó]xim[ao]s? faturas?|lan[cç]amentos futuros|parcelas a vencer|saldo parcelado|compras parceladas a vencer", re.IGNORECASE)
 REFUND = re.compile(r"estorno|reembolso|devolu[cç][aã]o|cashback|cr[eé]dito", re.IGNORECASE)
 
-DUE = re.compile(r"vencimento[^0-9]{0,40}(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})", re.IGNORECASE)
-DUE_NAMED = re.compile(rf"vencimento[^0-9]{{0,40}}(\d{{1,2}})\s*(?:de\s+)?({_MONTH_NAMES})[a-zç]*\.?\s*(?:de\s+)?(\d{{4}})", re.IGNORECASE)
-TOTAL = re.compile(r"(?:total\s+(?:desta|da)\s+fatura|valor\s+total\s+da\s+fatura|total\s+a\s+pagar|valor\s+da\s+fatura)[^0-9\n]{0,40}?(\d{1,3}(?:\.\d{3})*,\d{2})", re.IGNORECASE)
+# Searched on the text with spaces squeezed. Headers often sit on the line above their value
+# ("Total a Pagar   Vencimento" / "R$ 5.768,51   17/09/2026"), so values may be a few words away.
+# The value may come after other numbers of the same header row ("R$ 5.768,51  17/09/2026").
+DUE = re.compile(r"vencimento.{0,120}?\b(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4}|\d{2})\b", re.IGNORECASE | re.DOTALL)
+DUE_NAMED = re.compile(rf"vencimento[^0-9]{{0,80}}?(\d{{1,2}})\s*(?:de\s+)?({_MONTH_NAMES})[a-zç]*\.?\s*(?:de\s+)?(\d{{4}})", re.IGNORECASE)
+_MONEY = r"(\d{1,3}(?:\.\d{3})*,\d{2})"
+# Most specific first: the summary's final balance beats a header far from its value.
+TOTALS = [
+    re.compile(rf"\(=\)\s*saldo\s+desta\s+fatura[^0-9]{{0,20}}{_MONEY}", re.IGNORECASE),
+    re.compile(rf"saldo\s+desta\s+fatura[^0-9]{{0,20}}{_MONEY}", re.IGNORECASE),
+    re.compile(rf"total\s+(?:desta|da)\s+fatura[^0-9]{{0,40}}?{_MONEY}", re.IGNORECASE),
+    re.compile(rf"valor\s+total\s+da\s+fatura[^0-9]{{0,40}}?{_MONEY}", re.IGNORECASE),
+    re.compile(rf"total\s+a\s+pagar[^0-9]{{0,80}}?{_MONEY}", re.IGNORECASE),
+    re.compile(rf"valor\s+da\s+fatura[^0-9]{{0,40}}?{_MONEY}", re.IGNORECASE),
+]
+
+
+def _statement_total(text: str) -> int | None:
+    squeezed = re.sub(r"[ \t]+", " ", text)
+    for pattern in TOTALS:
+        m = pattern.search(squeezed)
+        if m:
+            return _cents(m.group(1))
+    return None
 
 ISSUERS = [("nubank", "Nubank"), ("nu pagamentos", "Nubank"), ("itau", "Itaú"), ("itaú", "Itaú"), ("bradesco", "Bradesco"),
            ("santander", "Santander"), ("banco inter", "Inter"), ("c6 bank", "C6 Bank"), ("caixa", "Caixa"),
@@ -75,6 +98,7 @@ def _issuer(text: str) -> str | None:
 
 
 def _due_date(text: str) -> date | None:
+    text = re.sub(r"[ \t]+", " ", text)
     m = DUE.search(text)
     if m:
         return _safe_date(_year(m.group(3), date.today().year), int(m.group(2)), int(m.group(1)))
@@ -131,6 +155,16 @@ def _date_at(tokens: list[str], i: int):
     return None, 0
 
 
+def _unglue(line: str) -> str:
+    """Some PDFs glue neighbouring columns: "-0,023" (amount + a marker column),
+    "0,00314/08RESTAURANTE" (amount + marker + date + description), "US$3"."""
+    line = re.sub(r"(\d,\d{2})(?=\d)", r"\1 ", line)
+    line = re.sub(r"(US\$|R\$)(?=\d{1,2}\s)", r"\1 ", line)
+    line = re.sub(r"(?<![\d/,.])(\d)(\d{2}/\d{2})(?=[A-Za-zÀ-ú*])", r"\1 \2 ", line)
+    line = re.sub(r"(?<![\d/])(\d{2}/\d{2})(?=[A-Za-zÀ-ú*])", r"\1 ", line)
+    return re.sub(r"(,\d{2})(?=[A-Za-zÀ-ú])", r"\1 ", line)
+
+
 def _records(line: str):
     """Splits one text line into transactions.
 
@@ -138,7 +172,7 @@ def _records(line: str):
     printed in two columns), an installment column ("MAGALU 07/10 389,90") and both a R$ and a
     US$ amount. Yields dicts with day, month, year, words, installment and amounts (signed cents).
     """
-    tokens = line.split()
+    tokens = _unglue(line).split()
     cur = None
     negative_next = False
     i = 0
@@ -215,7 +249,7 @@ def parse_statement_text(pages: list[str], today: date | None = None) -> dict:
     full = "\n".join(pages)
     due = _due_date(full)
     ref = due or today
-    total = TOTAL.search(full)
+    total = _statement_total(full)
     brl_first = _brl_first(full)
     warnings = []
     transactions = []
@@ -289,12 +323,23 @@ def parse_statement_text(pages: list[str], today: date | None = None) -> dict:
         )
     if not due:
         warnings.append("Não achei a data de vencimento; confira o ano das datas.")
+    # Double-check against the statement: everything read must add up to its printed total.
+    found = sum(t["amount_cents"] for t in transactions)
+    if total is None:
+        warnings.append("Não achei o total da fatura para conferir a soma; compare com o PDF antes de importar.")
+    elif found != total:
+        diff = (total - found) / 100
+        what = "faltando" if diff > 0 else "sobrando"
+        warnings.append(
+            f"A soma lida não bate com o total da fatura: há R$ {abs(diff):,.2f} {what}. ".replace(",", "X").replace(".", ",").replace("X", ".")
+            + "Confira os lançamentos e me avise qual é o banco para ajustarmos o leitor."
+        )
     return {
         "document_type": "fatura_cartao",
         "issuer": _issuer(full),
         "reference_month": due.strftime("%Y-%m") if due else None,
         "due_date": due.isoformat() if due else None,
-        "statement_total_cents": _cents(total.group(1)) if total else None,
+        "statement_total_cents": total,
         "transactions": transactions,
         "warnings": warnings,
     }

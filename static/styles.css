@@ -326,6 +326,7 @@ a.btn { text-decoration: none; color: inherit; }
   font-size: 14px;
 }
 .notice.error { background: var(--error-bg); color: var(--bad-text); }
+.notice.ok { background: color-mix(in srgb, var(--good-text) 12%, var(--surface)); color: var(--good-text); }
 .notice ul { margin: 6px 0 0; padding-left: 18px; }
 
 .muted { color: var(--muted); }

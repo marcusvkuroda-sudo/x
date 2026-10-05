@@ -1004,6 +1004,8 @@
     sourceInput.addEventListener("input", () => (review.source = sourceInput.value));
 
     const stats = h("div", { class: "review-stats" });
+    // Double-check against the statement: what was read must add up to its printed total.
+    const check = h("div", { class: "notice", style: "margin-bottom:16px" });
     const updateStats = () => {
       const included = rows.filter((r) => r.include);
       const total = included.reduce((a, r) => a + (parseAmount(r.amount) || 0), 0);
@@ -1011,9 +1013,20 @@
         h("div", {}, h("span", { text: "Selecionados" }), h("b", { text: `${included.length} de ${rows.length}` })),
         h("div", {}, h("span", { text: "Soma" }), h("b", { text: fmt(total) })),
       ];
-      if (detail.statement_total_cents != null) {
+      if (detail.statement_total_cents == null) {
+        check.className = "notice";
+        check.replaceChildren(h("b", { text: "Não achei o total da fatura para conferir. " }), "Compare a soma com o valor do PDF antes de importar.");
+      } else {
         const allTotal = rows.reduce((a, r) => a + (parseAmount(r.amount) || 0), 0);
         const diff = allTotal - detail.statement_total_cents;
+        const ok = Math.abs(diff) <= 1;
+        check.className = ok ? "notice ok" : "notice error";
+        check.replaceChildren(
+          h("b", { text: ok ? "✓ Conferido: " : "⚠ A soma não bate com a fatura: " }),
+          ok
+            ? `os ${rows.length} lançamentos somam ${fmt(allTotal)}, exatamente o total da fatura.`
+            : `os lançamentos somam ${fmt(allTotal)} e a fatura diz ${fmt(detail.statement_total_cents)} (${diff < 0 ? "faltam" : "sobram"} ${fmt(Math.abs(diff))}). Confira antes de importar.`
+        );
         items.push(
           h(
             "div",
@@ -1028,6 +1041,7 @@
       }
       stats.replaceChildren(...items);
     };
+    const warnings = detail.warnings.filter((w) => !w.startsWith("A soma lida não bate"));
     updateStats();
 
     const catOptions = state.meta.categories.map((c) => [c.key, `${c.icon} ${c.label}`]);
@@ -1159,7 +1173,8 @@
       rows.length && rows.every((r) => r.dup)
         ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "Parece que esta fatura já foi importada: " }), "todos os lançamentos já existem com a mesma data e valor. Se for o caso, é só descartar.")
         : null,
-      detail.warnings.length ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "Atenção:" }), h("ul", {}, detail.warnings.map((w) => h("li", { text: w })))) : null,
+      check,
+      warnings.length ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "Atenção:" }), h("ul", {}, warnings.map((w) => h("li", { text: w })))) : null,
       h("div", { class: "review-head" }, stats, h("label", { class: "field", style: "min-width:200px" }, h("span", { text: "Cartão / conta" }), sourceInput)),
       rows.length
         ? h(
