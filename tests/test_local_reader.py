@@ -216,7 +216,7 @@ def santander_pdf(password: str | None = "12345") -> tuple[bytes, int]:
     brl = f"{total / 100:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     y = 810
     for text in ("Santander", "Fatura do Cartão SANTANDER SX VISA", f"Vencimento 10/10/2026     Total a Pagar R$ {brl}",
-                 "Saldo anterior 1.500,00", "Detalhamento da Fatura", "MARCUS V KURODA - 4220 XXXX XXXX 1234"):
+                 "Saldo anterior 1.500,00", "Detalhamento da Fatura", "FULANO DE TAL - 1111 XXXX XXXX 1111"):
         c.drawString(40, y, text)
         y -= 12
     columns = (40, 310)
