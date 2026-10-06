@@ -59,24 +59,31 @@ def fake_pluggy(calls: list):
         if path == "/items/inter":
             return httpx.Response(200, json={"id": "inter", "status": "UPDATED", "connector": {"name": "Banco Inter"}})
         if path == "/items/santander":
-            return httpx.Response(200, json={"id": "santander", "status": "OUTDATED", "connector": {"name": "Santander"}})
+            # Connected through Meu Pluggy: the connector doesn't name the bank, the accounts do.
+            return httpx.Response(200, json={"id": "santander", "status": "OUTDATED", "connector": {"name": "MeuPluggy"}})
         if path.startswith("/items/"):
             return httpx.Response(404, json={"message": "not found"})
         if path == "/accounts":
             if q["itemId"] == "inter":
                 return httpx.Response(200, json={"results": [{"id": "acc", "type": "BANK"}], "totalPages": 1})
-            card = {"id": "card", "type": "CREDIT",
+            card = {"id": "card", "type": "CREDIT", "name": "SANTANDER SX VISA",
                     "creditData": {"balanceCloseDate": "2026-09-28T00:00:00.000Z", "balanceDueDate": "2026-11-08"}}
             return httpx.Response(200, json={"results": [card, {"id": "sacc", "type": "BANK"}], "totalPages": 1})
         if path == "/bills":
             # Not paged, on purpose.
             return httpx.Response(200, json=[{"id": "b9", "dueDate": "2026-09-20"}, {"id": "b10", "dueDate": "2026-10-20"}])
         if path == "/transactions":
+            return httpx.Response(410, json={"message": "This endpoint is deprecated. Use GET /v2/transactions"})
+        if path == "/v2/transactions":
+            assert "dateFrom" in q and "page" not in q
             txs = {"card": CARD_TXS, "acc": ACCOUNT_TXS, "sacc": SANTANDER_ACCOUNT_TXS}[q["accountId"]]
-            # two pages, to exercise paging
-            page = int(q["page"])
+            # two pages, to exercise the cursor (a base64 cursor with "+" and "=")
             half = len(txs) // 2
-            return httpx.Response(200, json={"results": txs[:half] if page == 1 else txs[half:], "totalPages": 2})
+            if q.get("after") == "c2Vn+dW5kYQ==":
+                return httpx.Response(200, json={"results": txs[half:], "next": None})
+            assert "after" not in q
+            nxt = f"?accountId={q['accountId']}&after=c2Vn%2BdW5kYQ%3D%3D"
+            return httpx.Response(200, json={"results": txs[:half], "next": nxt})
         return httpx.Response(500)
 
     return httpx.MockTransport(handler)

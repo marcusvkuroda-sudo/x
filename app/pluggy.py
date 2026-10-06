@@ -11,6 +11,8 @@ import os
 import re
 from datetime import date, timedelta
 
+from urllib.parse import parse_qs, urlsplit
+
 import httpx
 
 from . import config
@@ -153,15 +155,54 @@ class Client:
                 return out
             page += 1
 
+    def cursor(self, path: str, **params) -> list[dict]:
+        """Endpoints with cursor paging (GET /v2/...): each page says where the next one starts."""
+        out, after = [], None
+        for _ in range(1000):  # safety net against a cursor that never ends
+            data = self.get(path, after=after, **params)
+            out += data.get("results") or []
+            nxt = data.get("next")
+            after = parse_qs(urlsplit(nxt).query).get("after", [None])[0] if nxt else None
+            if not after:
+                break
+        return out
+
+
+# Banks we can recognize in account names (Meu Pluggy connections are all named "MeuPluggy").
+_BANKS = [("inter", "Inter"), ("santander", "Santander"), ("nubank", "Nubank"), ("nu pagamentos", "Nubank"),
+          ("itau", "Itaú"), ("itaú", "Itaú"), ("bradesco", "Bradesco"), ("caixa", "Caixa"), ("c6", "C6 Bank"),
+          ("banco do brasil", "Banco do Brasil"), ("ourocard", "Banco do Brasil"), ("btg", "BTG"), ("xp", "XP"),
+          ("mercado pago", "Mercado Pago"), ("picpay", "PicPay"), ("sicredi", "Sicredi"), ("sicoob", "Sicoob"),
+          ("neon", "Neon"), ("pan", "Banco Pan"), ("original", "Original"), ("safra", "Safra")]
+
+
+def _bank_name(client: Client, item: dict, position: int) -> str:
+    name = ((item.get("connector") or {}).get("name") or "").strip()
+    if name and "pluggy" not in name.lower():
+        return name
+    # Meu Pluggy: look for the bank in the accounts' names.
+    try:
+        accounts = client.paged("/accounts", itemId=item.get("id"))
+    except SyncError:
+        accounts = []
+    text = " " + " ".join(
+        str(a.get(k) or "") for a in accounts for k in ("name", "marketingName", "number")
+    ).lower() + " "
+    text = re.sub(r"[^a-z0-9à-ú]+", " ", text)
+    for key, bank in _BANKS:
+        if f" {key} " in text:
+            return bank
+    return f"Banco {position}"
+
 
 def describe_items(client: Client, item_ids: list[str]) -> list[dict]:
     items = []
-    for item_id in item_ids:
+    for position, item_id in enumerate(item_ids, start=1):
         item = client.get(f"/items/{item_id}")
         items.append(
             {
                 "id": item_id,
-                "bank": (item.get("connector") or {}).get("name") or "Banco",
+                "bank": _bank_name(client, {**item, "id": item_id}, position),
                 "status": item.get("status") or "",
                 "updated_at": item.get("lastUpdatedAt") or item.get("updatedAt"),
             }
@@ -259,7 +300,7 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
             card = account.get("type") == "CREDIT"
             bill_by_id, open_bill = _bill_schedule(client, account) if card else ({}, lambda _d: None)
             source = f"{item['bank']} {'cartão' if card else 'conta'}"
-            for t in client.paged("/transactions", accountId=account["id"], **{"from": since.isoformat()}):
+            for t in client.cursor("/v2/transactions", accountId=account["id"], dateFrom=since.isoformat()):
                 if not t.get("id") or (t.get("status") or "POSTED") == "PENDING":
                     continue
                 ext_id = f"pluggy:{t['id']}"
