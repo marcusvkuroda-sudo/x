@@ -55,6 +55,17 @@ _RAW_RULES = [
     (re.compile(r"\bkeeta", re.IGNORECASE), "restaurantes"),
 ]
 
+# Lines of a bank account that move money without spending it: paying the card bill, moving it
+# between your own accounts or into investments. Bills paid by boleto/Pix are real spending.
+NOT_SPENDING = re.compile(
+    r"pagamento\s+(de\s+)?fatura|pgto\s+fatura|fatura\s+cart|pag\s+fat|pa?gto?\.?\s+cart[aã]o|"
+    r"deb\.?\s*autom\w*\s+(de\s+)?fatura|"
+    r"aplica[cç][aã]o|resgate|invest|poupan[cç]a|\bcdb\b|tesouro|"
+    r"transfer[eê]ncia\s+entre\s+contas|mesma\s+titularidade|"
+    r"pagamento\s+recebido|cr[eé]dito\s+de\s+pagamento",
+    re.IGNORECASE,
+)
+
 # Payment processors print a prefix before the real merchant name.
 _PREFIXES = re.compile(r"^(ifd|pg|pag|mp|ec|ppro|pagseguro|pagbank|ebanx|dl|sumup|iz|pp|ame|picpay)\s*\*\s*", re.IGNORECASE)
 

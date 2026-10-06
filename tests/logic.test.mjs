@@ -82,3 +82,20 @@ test("finished and stale purchases are not pending", () => {
   ];
   assert.deepEqual(summary(txs), []);
 });
+
+test("a bank sync bringing several statements counts each purchase once", () => {
+  const line = (bill, k, source = "Santander cartão") =>
+    tx({ import_id: 7, source, date: `${bill}-10`, bill_month: bill, merchant: "Magalu", installment: `${k}/10`, amount_cents: 12000 });
+  const txs = [line("2026-07", 2), line("2026-08", 3), line("2026-09", 4), line("2026-09", 4, "Inter cartão")];
+  // The Inter card has its own purchase with the same value: still two purchases.
+  assert.deepEqual(summary(txs), [["Magalu", 4, 10, 72000], ["Magalu", 4, 10, 72000]]);
+});
+
+test("statement month beats the date when matching installments", () => {
+  // 1st installment dated on the purchase (July), billed in August; 2nd billed in September.
+  const txs = [
+    tx({ import_id: 1, date: "2026-07-28", bill_month: "2026-08", merchant: "Sofá", installment: "1/6", amount_cents: 500 }),
+    tx({ import_id: 2, date: "2026-09-05", bill_month: "2026-09", merchant: "Sofá", installment: "2/6", amount_cents: 500 }),
+  ];
+  assert.deepEqual(summary(txs), [["Sofá", 2, 6, 2000]]);
+});

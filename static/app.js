@@ -993,7 +993,7 @@
       state.review[id] = {
         source: detail.source || detail.issuer || "",
         rows: detail.transactions.map((t) => ({
-          include: !t.possible_duplicate,
+          include: !t.possible_duplicate && !t.suggest_skip,
           date: t.date,
           description: t.description,
           merchant: t.merchant,
@@ -1007,6 +1007,7 @@
           source: t.source || "",
           external_id: t.external_id || null,
           bill_month: t.bill_month || null,
+          skipReason: t.suggest_skip || null,
         })),
       };
     }
@@ -1103,6 +1104,7 @@
       if (parseAmount(r.amount) < 0) tags.push(h("span", { class: "tag info", text: "estorno/crédito" }));
       if (r.dup) tags.push(h("span", { class: "tag", text: `possível duplicado de “${r.dup}”` }));
       if (bank && r.source) tags.push(h("span", { class: "tag info", text: r.source }));
+      if (r.skipReason) tags.push(h("span", { class: "tag", text: r.skipReason }));
       if (r.notes) tags.push(h("span", { class: "tag info", text: r.notes }));
       tr.append(h("td", {}, check), h("td", {}, dateIn), h("td", { class: "desc-cell" }, descIn, tags.length ? h("div", {}, tags) : null), h("td", {}, catSel), h("td", {}, amtIn));
       return tr;

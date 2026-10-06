@@ -417,10 +417,12 @@ def get_import(import_id: int):
         txs = extracted["transactions"] if extracted else []
         for t in txs:
             # Same day and value already recorded (outside this import) -> probable duplicate.
+            # Other installments of the same purchase (2/10, 3/10) may share date and value.
             dup = conn.execute(
                 """SELECT description FROM transactions
-                   WHERE date = ? AND amount_cents = ? AND (import_id IS NULL OR import_id != ?) LIMIT 1""",
-                (t["date"], t["amount_cents"], import_id),
+                   WHERE date = ? AND amount_cents = ? AND (import_id IS NULL OR import_id != ?)
+                     AND (installment IS NULL OR ? IS NULL OR installment = ?) LIMIT 1""",
+                (t["date"], t["amount_cents"], import_id, t.get("installment"), t.get("installment")),
             ).fetchone()
             t["possible_duplicate"] = dup["description"] if dup else None
         detail["transactions"] = txs
@@ -496,7 +498,8 @@ def bank_status(check: bool = False):
     }
     if check and out["configured"]:
         try:
-            out["items"] = pluggy.describe_items(pluggy.Client(s["client_id"], s["client_secret"]), s["item_ids"])
+            with pluggy.Client(s["client_id"], s["client_secret"]) as client:
+                out["items"] = pluggy.describe_items(client, s["item_ids"])
         except pluggy.SyncError as exc:
             out["error"] = str(exc)
     return out
@@ -516,11 +519,11 @@ def bank_config(body: BankConfig):
         raise HTTPException(422, "Cole pelo menos um Item ID.")
     # Only save what works: try the credentials and each connection first.
     try:
-        items = pluggy.describe_items(pluggy.Client(client_id, secret), item_ids)
+        with pluggy.Client(client_id, secret) as client:
+            items = pluggy.describe_items(client, item_ids)
     except pluggy.SyncError as exc:
         raise HTTPException(400, str(exc)) from exc
-    keep_sync = saved["last_sync"] if set(item_ids) <= set(saved["item_ids"]) else None
-    pluggy.save_settings(client_id, secret, item_ids, keep_sync)
+    pluggy.save_settings(client_id, secret, item_ids, saved["last_sync"])
     return {"items": items}
 
 
@@ -530,9 +533,11 @@ def _run_bank_sync(import_id: int) -> None:
     try:
         with db.session() as conn:
             known = {r[0] for r in conn.execute("SELECT external_id FROM transactions WHERE external_id IS NOT NULL")}
-            # Entries waiting in another sync's review screen should not show up twice.
+            # Entries already shown in another sync (waiting for review, or left unchecked when it
+            # was imported) don't show up again. Deleting that import brings them back.
             for r in conn.execute(
-                "SELECT extracted_json FROM imports WHERE status = 'review' AND model = 'open-finance' AND id != ?",
+                """SELECT extracted_json FROM imports
+                   WHERE status IN ('review', 'confirmed') AND model = 'open-finance' AND id != ?""",
                 (import_id,),
             ):
                 known |= {t.get("external_id") for t in json.loads(r[0] or "{}").get("transactions", [])}
@@ -540,8 +545,8 @@ def _run_bank_sync(import_id: int) -> None:
             last_confirmed = conn.execute(
                 "SELECT MAX(created_at) FROM imports WHERE status = 'confirmed' AND model = 'open-finance'"
             ).fetchone()[0]
-        client = pluggy.Client(s["client_id"], s["client_secret"])
-        result = pluggy.fetch(client, s["item_ids"], pluggy.sync_since(last_confirmed), known)
+        with pluggy.Client(s["client_id"], s["client_secret"]) as client:
+            result = pluggy.fetch(client, s["item_ids"], pluggy.sync_since(last_confirmed), known)
     except pluggy.SyncError as exc:
         _fail_import(import_id, str(exc))
         return
@@ -551,8 +556,15 @@ def _run_bank_sync(import_id: int) -> None:
         return
     if not result["transactions"]:
         result["warnings"].append("Nenhum gasto novo desde a última sincronização.")
+    with db.session() as conn:
+        # Entries imported while their card bill was still open: now their statement month is known.
+        for ext_id, month in result["bill_updates"].items():
+            conn.execute(
+                "UPDATE transactions SET bill_month = ? WHERE external_id = ? AND COALESCE(bill_month, '') != ?",
+                (month, ext_id, month),
+            )
     _finish_import(import_id, result)
-    pluggy.save_settings(s["client_id"], s["client_secret"], s["item_ids"], started)
+    pluggy.mark_synced(started)
 
 
 @app.post("/api/bank/sync", status_code=202)

@@ -378,3 +378,56 @@ def test_mismatch_with_the_statement_total_is_reported():
     pages = [SANTANDER_REAL_LAYOUT[0], SANTANDER_REAL_LAYOUT[1].replace("RESTURANTE CENTRAL         196,91", "")]
     r = local_reader.parse_statement_text(pages, today=date(2026, 10, 5))
     assert any("não bate" in w for w in r["warnings"])
+
+
+def test_account_extract_keeps_bills_and_each_month():
+    data = """data;descricao;valor
+05/07/2026;Pix enviado - Padaria;-15,50
+10/07/2026;Pagamento de boleto ENEL;-230,00
+01/08/2026;Salario;5000,00
+12/08/2026;Compra no debito MERCADO;-120,00
+10/09/2026;Pagamento fatura cartao;-1500,00
+11/09/2026;Aplicacao CDB;-300,00
+15/09/2026;Saldo do dia;-30,00
+""".encode()
+    r = local_reader.parse_csv(data, "extrato.csv")
+    assert [t["description"] for t in r["transactions"]] == [
+        "Pix enviado - Padaria", "Pagamento de boleto ENEL", "Compra no debito MERCADO"]
+    # Three months of an account: each entry counts in its own month, not all in September.
+    assert r["reference_month"] is None
+
+
+def test_card_export_still_skips_the_bill_payment():
+    data = "date,title,amount\n2026-09-01,Uber,23.40\n2026-09-05,Pagamento recebido,-500.00\n2026-09-06,Estorno Uber,-23.40\n".encode()
+    r = local_reader.parse_csv(data, "nubank.csv")
+    assert [(t["description"], t["amount_cents"]) for t in r["transactions"]] == [("Uber", 2340), ("Estorno Uber", -2340)]
+    assert r["reference_month"] == "2026-09"
+
+
+def test_ofx_with_brazilian_amounts():
+    ofx = b"""OFXHEADER:100
+<OFX><BANKTRANLIST>
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20260912<TRNAMT>-1.234,56<MEMO>ALUGUEL</STMTTRN>
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20260913<TRNAMT>-12,50<MEMO>PADARIA</STMTTRN>
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20260914<TRNAMT>-7.50<MEMO>CAFE</STMTTRN>
+</BANKTRANLIST></OFX>"""
+    r = local_reader.parse_ofx(ofx, "x.ofx")
+    assert [t["amount_cents"] for t in r["transactions"]] == [123456, 1250, 750]
+
+
+def test_credit_card_charges_are_not_refunds():
+    pages = ["""Vencimento 17/09/2026
+12/08 ANUIDADE CARTAO DE CREDITO 10/12 35,00
+15/08 JUROS DE CREDITO ROTATIVO 45,10
+16/08 ESTORNO ANUIDADE 35,00
+17/08 CREDITO LOJA Y 10,00
+Total a pagar R$ 35,10
+"""]
+    r = local_reader.parse_statement_text(pages)
+    assert [t["amount_cents"] for t in r["transactions"]] == [3500, 4510, -3500, -1000]
+    assert r["warnings"] == []
+
+
+def test_mismatch_message_keeps_its_punctuation():
+    r = local_reader.parse_statement_text(["Vencimento 17/09/2026\n12/08 LOJA 1.035,00\nTotal a pagar R$ 5,00\n"])
+    assert "R$ 1.030,00 sobrando. Confira" in r["warnings"][0]

@@ -119,7 +119,10 @@ gratuito para as suas próprias contas (até 5 conexões, todas do mesmo titular
 
 - A primeira sincronização traz os últimos 90 dias; as próximas só o que for novo (nada entra duas vezes).
 - Ficam de fora: pagamento de fatura, transferências entre suas contas, aplicações/resgates e dinheiro
-  recebido. Compras no cartão contam no mês da fatura em que caíram.
+  recebido. Quando um valor sai de um banco e entra no outro (um Pix entre vocês dois, a fatura do
+  Santander paga pelo Inter), ele chega **desmarcado** na revisão, com o motivo ao lado: marque se for
+  gasto de verdade. Compras no cartão contam no mês da fatura em que caíram, inclusive as da fatura
+  que ainda está aberta.
 - Se um banco aparecer como "reconecte no meu.pluggy.ai", renove a autorização lá (o Open Finance pede
   isso de tempos em tempos).
 - As chaves ficam só no computador, em `data/pluggy.json` (o app nunca mostra o Client Secret de volta).
