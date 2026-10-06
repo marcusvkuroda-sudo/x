@@ -74,6 +74,12 @@ def init() -> None:
     with session() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        # Columns added after the first version: add them to existing databases.
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(transactions)")}
+        for name in ("external_id", "bill_month"):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE transactions ADD COLUMN {name} TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_external ON transactions(external_id)")
 
 
 def backup_daily() -> None:

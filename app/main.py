@@ -9,6 +9,7 @@ import shutil
 import traceback
 from contextlib import asynccontextmanager
 from datetime import date as Date
+from datetime import datetime
 from typing import Literal
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -16,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import config, db, documents, extractor, local_reader, rules
+from . import config, db, documents, extractor, local_reader, pluggy, rules
 from .categories import CATEGORIES, CATEGORY_KEYS
 
 CategoryKey = Literal[tuple(CATEGORY_KEYS)]  # type: ignore[valid-type]
@@ -67,6 +68,10 @@ class TransactionIn(BaseModel):
     source: str = Field(default="", max_length=100)
     installment: str | None = None
     notes: str = Field(default="", max_length=500)
+    # Set by bank sync: the bank's id for the entry (avoids importing it twice) and the month of
+    # the card statement it belongs to.
+    external_id: str | None = Field(default=None, max_length=100)
+    bill_month: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}$")
 
     @field_validator("amount_cents")
     @classmethod
@@ -110,8 +115,9 @@ def _row(r) -> dict:
 def _insert_transaction(conn, t: TransactionIn, origin: str, import_id: int | None = None) -> int:
     cur = conn.execute(
         """INSERT INTO transactions
-           (date, description, merchant, amount_cents, category, source, installment, notes, origin, import_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (date, description, merchant, amount_cents, category, source, installment, notes, origin, import_id,
+            external_id, bill_month)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             t.date.isoformat(),
             t.description.strip(),
@@ -123,6 +129,8 @@ def _insert_transaction(conn, t: TransactionIn, origin: str, import_id: int | No
             t.notes.strip(),
             origin,
             import_id,
+            t.external_id,
+            t.bill_month,
         ),
     )
     return cur.lastrowid
@@ -159,11 +167,16 @@ def list_transactions():
         # dashboard can add things up exactly like the bank's statements. Manual entries count
         # in the month of their own date.
         rows = conn.execute(
-            """SELECT t.*, COALESCE(i.reference_month, substr(t.date, 1, 7)) AS bill_month
+            """SELECT t.*, COALESCE(t.bill_month, i.reference_month, substr(t.date, 1, 7)) AS effective_month
                FROM transactions t LEFT JOIN imports i ON i.id = t.import_id
                ORDER BY t.date DESC, t.id DESC"""
         ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["bill_month"] = d.pop("effective_month")
+        out.append(d)
+    return out
 
 
 @app.post("/api/transactions", status_code=201)
@@ -289,36 +302,45 @@ def _run_extraction(import_id: int, uploads: list[documents.Upload], password: s
         traceback.print_exc()  # shows up in the app's window, handy to report a bug
         message = f"Erro inesperado ao ler a fatura ({type(exc).__name__}: {exc}). Se repetir, mande um print da janela preta."
     else:
-        with db.session() as conn:
-            # Categories the couple corrected before win over Claude's guess.
-            for t in result["transactions"]:
-                remembered = rules.lookup(conn, t["description"], t["merchant"])
-                t["category_source"] = "rule" if remembered else "auto"
-                if remembered:
-                    t["category"] = remembered
-            conn.execute(
-                """UPDATE imports SET status = 'review', issuer = ?, reference_month = ?, due_date = ?,
-                   statement_total_cents = ?, extracted_json = ?, input_tokens = ?, output_tokens = ?, model = ?
-                   WHERE id = ?""",
-                (
-                    result["issuer"],
-                    result["reference_month"],
-                    result["due_date"],
-                    result["statement_total_cents"],
-                    json.dumps(
-                        {"transactions": result["transactions"], "warnings": result["warnings"],
-                         "document_type": result["document_type"]},
-                        ensure_ascii=False,
-                    ),
-                    result["input_tokens"],
-                    result["output_tokens"],
-                    result["model"],
-                    import_id,
-                ),
-            )
+        _finish_import(import_id, result)
         return
+    _fail_import(import_id, message)
+
+
+def _fail_import(import_id: int, message: str) -> None:
     with db.session() as conn:
         conn.execute("UPDATE imports SET status = 'error', error = ? WHERE id = ?", (message, import_id))
+
+
+def _finish_import(import_id: int, result: dict) -> None:
+    """Puts what was read up for review."""
+    with db.session() as conn:
+        # Categories the couple corrected before win over Claude's guess.
+        for t in result["transactions"]:
+            remembered = rules.lookup(conn, t["description"], t["merchant"])
+            t["category_source"] = "rule" if remembered else "auto"
+            if remembered:
+                t["category"] = remembered
+        conn.execute(
+            """UPDATE imports SET status = 'review', issuer = ?, reference_month = ?, due_date = ?,
+               statement_total_cents = ?, extracted_json = ?, input_tokens = ?, output_tokens = ?, model = ?
+               WHERE id = ?""",
+            (
+                result["issuer"],
+                result["reference_month"],
+                result["due_date"],
+                result["statement_total_cents"],
+                json.dumps(
+                    {"transactions": result["transactions"], "warnings": result["warnings"],
+                     "document_type": result["document_type"]},
+                    ensure_ascii=False,
+                ),
+                result["input_tokens"],
+                result["output_tokens"],
+                result["model"],
+                import_id,
+            ),
+        )
 
 
 @app.post("/api/imports", status_code=202)
@@ -420,13 +442,19 @@ def confirm_import(import_id: int, body: ImportConfirm):
             if not conn.execute("SELECT 1 FROM imports WHERE id = ?", (import_id,)).fetchone():
                 raise HTTPException(404, "Importação não encontrada.")
             raise HTTPException(409, "Esta fatura já foi importada (ou descartada) em outro aparelho.")
+        imported = 0
         for t in body.transactions:
+            if t.external_id and conn.execute(
+                "SELECT 1 FROM transactions WHERE external_id = ?", (t.external_id,)
+            ).fetchone():
+                continue  # already came in through another bank sync
             if not t.source:
                 t.source = body.source
             _insert_transaction(conn, t, "import", import_id)
+            imported += 1
             if t.remember:
                 rules.learn(conn, t.description, t.merchant, t.category)
-    return {"imported": len(body.transactions)}
+    return {"imported": imported}
 
 
 @app.delete("/api/imports/{import_id}", status_code=204)
@@ -436,6 +464,114 @@ def delete_import(import_id: int):
         if conn.execute("DELETE FROM imports WHERE id = ?", (import_id,)).rowcount == 0:
             raise HTTPException(404, "Importação não encontrada.")
     shutil.rmtree(config.UPLOAD_DIR / str(import_id), ignore_errors=True)
+
+
+# ---------------------------------------------------------------- bank sync (Open Finance)
+
+
+class BankConfig(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    # Empty keeps what is already saved (the screen never shows the secret back).
+    client_id: str = Field(default="", max_length=200)
+    client_secret: str = Field(default="", max_length=500)
+    item_ids: str = Field(min_length=1, max_length=2000)
+
+
+def _mask(value: str) -> str:
+    return value[:4] + "…" + value[-4:] if len(value) > 10 else "…"
+
+
+@app.get("/api/bank")
+def bank_status(check: bool = False):
+    s = pluggy.load_settings()
+    out = {
+        "configured": pluggy.configured(s),
+        "client_id": _mask(s["client_id"]) if s["client_id"] else "",
+        "has_secret": bool(s["client_secret"]),
+        "item_ids": s["item_ids"],
+        "last_sync": s["last_sync"],
+        "items": [],
+        "error": None,
+    }
+    if check and out["configured"]:
+        try:
+            out["items"] = pluggy.describe_items(pluggy.Client(s["client_id"], s["client_secret"]), s["item_ids"])
+        except pluggy.SyncError as exc:
+            out["error"] = str(exc)
+    return out
+
+
+@app.post("/api/bank/config")
+def bank_config(body: BankConfig):
+    saved = pluggy.load_settings()
+    client_id = body.client_id or saved["client_id"]
+    secret = body.client_secret or saved["client_secret"]
+    item_ids = pluggy.parse_item_ids(body.item_ids)
+    if not client_id:
+        raise HTTPException(422, "Cole o Client ID.")
+    if not secret:
+        raise HTTPException(422, "Cole o Client Secret.")
+    if not item_ids:
+        raise HTTPException(422, "Cole pelo menos um Item ID.")
+    # Only save what works: try the credentials and each connection first.
+    try:
+        items = pluggy.describe_items(pluggy.Client(client_id, secret), item_ids)
+    except pluggy.SyncError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    keep_sync = saved["last_sync"] if set(item_ids) <= set(saved["item_ids"]) else None
+    pluggy.save_settings(client_id, secret, item_ids, keep_sync)
+    return {"items": items}
+
+
+def _run_bank_sync(import_id: int) -> None:
+    s = pluggy.load_settings()
+    started = datetime.now().isoformat(timespec="seconds")
+    try:
+        with db.session() as conn:
+            known = {r[0] for r in conn.execute("SELECT external_id FROM transactions WHERE external_id IS NOT NULL")}
+            # Entries waiting in another sync's review screen should not show up twice.
+            for r in conn.execute(
+                "SELECT extracted_json FROM imports WHERE status = 'review' AND model = 'open-finance' AND id != ?",
+                (import_id,),
+            ):
+                known |= {t.get("external_id") for t in json.loads(r[0] or "{}").get("transactions", [])}
+            # Start from the last sync that was imported: a discarded one is fetched again.
+            last_confirmed = conn.execute(
+                "SELECT MAX(created_at) FROM imports WHERE status = 'confirmed' AND model = 'open-finance'"
+            ).fetchone()[0]
+        client = pluggy.Client(s["client_id"], s["client_secret"])
+        result = pluggy.fetch(client, s["item_ids"], pluggy.sync_since(last_confirmed), known)
+    except pluggy.SyncError as exc:
+        _fail_import(import_id, str(exc))
+        return
+    except Exception as exc:
+        traceback.print_exc()
+        _fail_import(import_id, f"Erro inesperado ao sincronizar ({type(exc).__name__}: {exc}). Se repetir, mande um print da janela preta.")
+        return
+    if not result["transactions"]:
+        result["warnings"].append("Nenhum gasto novo desde a última sincronização.")
+    _finish_import(import_id, result)
+    pluggy.save_settings(s["client_id"], s["client_secret"], s["item_ids"], started)
+
+
+@app.post("/api/bank/sync", status_code=202)
+def bank_sync(background: BackgroundTasks):
+    if not pluggy.configured():
+        raise HTTPException(400, "Configure a conexão com os bancos primeiro.")
+    with db.session() as conn:
+        busy = conn.execute(
+            "SELECT id FROM imports WHERE status = 'processing' AND file_hash LIKE 'open-finance:%'"
+        ).fetchone()
+        if busy:
+            return {"id": busy["id"]}
+        cur = conn.execute(
+            "INSERT INTO imports (filenames, file_hash, status) VALUES (?, ?, 'processing')",
+            (json.dumps(["Open Finance"]), f"open-finance:{datetime.now().isoformat()}"),
+        )
+        import_id = cur.lastrowid
+    background.add_task(_run_bank_sync, import_id)
+    return {"id": import_id}
 
 
 @app.exception_handler(HTTPException)

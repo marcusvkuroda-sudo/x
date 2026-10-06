@@ -186,6 +186,42 @@
             </div>
           </div>
 
+          <div class="card" id="bank-card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">🏦 Bancos conectados</h2>
+                <p class="card-sub" id="bank-sub">Puxe os gastos direto do banco pelo Open Finance (Meu Pluggy, grátis).</p>
+              </div>
+            </div>
+            <div id="bank-status"></div>
+            <div class="notice error" id="bank-error" style="margin-top:12px" hidden></div>
+            <div style="margin-top:16px; display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap">
+              <button class="btn btn-ghost" id="bank-edit-btn" type="button">⚙️ Configurar</button>
+              <button class="btn btn-primary" id="bank-sync-btn" type="button" hidden>🔄 Sincronizar agora</button>
+            </div>
+            <form id="bank-form" style="margin-top:16px" hidden>
+              <div class="form-row">
+                <label class="field">
+                  <span>Client ID</span>
+                  <input class="input" id="bank-client-id" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+                </label>
+                <label class="field">
+                  <span>Client Secret</span>
+                  <input class="input" id="bank-client-secret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
+                  <small id="bank-secret-hint">Fica salvo só neste computador.</small>
+                </label>
+              </div>
+              <label class="field" style="margin-top:12px">
+                <span>Item IDs (um por banco)</span>
+                <textarea class="input" id="bank-items" rows="2" autocomplete="off" spellcheck="false" required placeholder="cole aqui o Item ID do Inter e o do Santander, um por linha"></textarea>
+                <small>Ficam em dashboard.pluggy.ai, na conexão de cada banco.</small>
+              </label>
+              <div style="margin-top:12px; display:flex; justify-content:flex-end">
+                <button class="btn btn-primary" id="bank-save-btn" type="submit">💾 Testar e salvar</button>
+              </div>
+            </form>
+          </div>
+
         </div>
 
         <div class="card span-5">

@@ -36,6 +36,7 @@
     similar: null, // transactions from the same place as the one being edited
     txLimit: TX_PAGE,
     basis: "bill", // "bill": month of the statement · "purchase": purchase date
+    bank: null, // Open Finance settings (never includes the secret)
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -173,6 +174,7 @@
     if (location.hash !== `#${view}`) history.replaceState(null, "", `#${view}`);
     window.Charts.tooltip.hide();
     render();
+    if (view === "import") loadBank(true);
   }
 
   function render() {
@@ -937,6 +939,7 @@
         const changed = before.some((id) => state.imports.find((i) => i.id === id)?.status !== "processing");
         if (settleUpload() || changed) {
           if (state.view === "import") renderImport();
+          if (changed) loadBank();
         }
         if (!state.imports.some((i) => i.status === "processing")) {
           clearInterval(pollTimer);
@@ -962,8 +965,13 @@
             h(
               "div",
               {},
-              h("b", { text: "Lendo a fatura…" }),
-              h("div", { class: "muted", text: `${imp.filenames.join(", ")} · ${state.meta.reader === "claude" ? "costuma levar de 30 segundos a 2 minutos" : "leva poucos segundos"}. Pode sair desta tela.` })
+              h("b", { text: isBankSync(imp) ? "Buscando os gastos nos bancos…" : "Lendo a fatura…" }),
+              h("div", {
+                class: "muted",
+                text: isBankSync(imp)
+                  ? "Open Finance · costuma levar menos de um minuto. Pode sair desta tela."
+                  : `${imp.filenames.join(", ")} · ${state.meta.reader === "claude" ? "costuma levar de 30 segundos a 2 minutos" : "leva poucos segundos"}. Pode sair desta tela.`,
+              })
             )
           )
         );
@@ -980,6 +988,7 @@
 
   async function reviewCard(id) {
     const detail = await api(`/api/imports/${id}`);
+    const bank = detail.document_type === "open_finance";
     if (!state.review[id]) {
       state.review[id] = {
         source: detail.source || detail.issuer || "",
@@ -995,6 +1004,9 @@
           installment: t.installment,
           notes: t.notes,
           dup: t.possible_duplicate,
+          source: t.source || "",
+          external_id: t.external_id || null,
+          bill_month: t.bill_month || null,
         })),
       };
     }
@@ -1013,7 +1025,10 @@
         h("div", {}, h("span", { text: "Selecionados" }), h("b", { text: `${included.length} de ${rows.length}` })),
         h("div", {}, h("span", { text: "Soma" }), h("b", { text: fmt(total) })),
       ];
-      if (detail.statement_total_cents == null) {
+      if (bank) {
+        check.className = "notice";
+        check.replaceChildren(h("b", { text: "Direto do banco: " }), "pagamentos de fatura, transferências entre contas e dinheiro recebido já ficaram de fora.");
+      } else if (detail.statement_total_cents == null) {
         check.className = "notice";
         check.replaceChildren(h("b", { text: "Não achei o total da fatura para conferir. " }), "Compare a soma com o valor do PDF antes de importar.");
       } else {
@@ -1087,6 +1102,7 @@
       if (r.installment) tags.push(h("span", { class: "tag info", text: `parcela ${r.installment}` }));
       if (parseAmount(r.amount) < 0) tags.push(h("span", { class: "tag info", text: "estorno/crédito" }));
       if (r.dup) tags.push(h("span", { class: "tag", text: `possível duplicado de “${r.dup}”` }));
+      if (bank && r.source) tags.push(h("span", { class: "tag info", text: r.source }));
       if (r.notes) tags.push(h("span", { class: "tag info", text: r.notes }));
       tr.append(h("td", {}, check), h("td", {}, dateIn), h("td", { class: "desc-cell" }, descIn, tags.length ? h("div", {}, tags) : null), h("td", {}, catSel), h("td", {}, amtIn));
       return tr;
@@ -1116,6 +1132,9 @@
           category: r.category,
           installment: r.installment,
           notes: r.notes || "",
+          source: r.source || "",
+          external_id: r.external_id,
+          bill_month: r.bill_month,
           remember: r.category !== r.initialCategory,
         });
       }
@@ -1168,14 +1187,19 @@
       h(
         "div",
         { class: "card-head" },
-        h("div", {}, h("h2", { class: "card-title", text: `👀 Revisar: ${titleBits[0] || detail.filenames.join(", ")}` }), h("p", { class: "card-sub", text: titleBits.slice(1).join(" · ") || detail.filenames.join(", ") }))
+        h(
+          "div",
+          {},
+          h("h2", { class: "card-title", text: `👀 Revisar: ${titleBits[0] || detail.filenames.join(", ")}` }),
+          h("p", { class: "card-sub", text: bank ? "Gastos novos vindos do Open Finance" : titleBits.slice(1).join(" · ") || detail.filenames.join(", ") })
+        )
       ),
       rows.length && rows.every((r) => r.dup)
         ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "Parece que esta fatura já foi importada: " }), "todos os lançamentos já existem com a mesma data e valor. Se for o caso, é só descartar.")
         : null,
       check,
       warnings.length ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "Atenção:" }), h("ul", {}, warnings.map((w) => h("li", { text: w })))) : null,
-      h("div", { class: "review-head" }, stats, h("label", { class: "field", style: "min-width:200px" }, h("span", { text: "Cartão / conta" }), sourceInput)),
+      h("div", { class: "review-head" }, stats, bank ? null : h("label", { class: "field", style: "min-width:200px" }, h("span", { text: "Cartão / conta" }), sourceInput)),
       rows.length
         ? h(
             "div",
@@ -1191,6 +1215,125 @@
       errEl,
       h("div", { class: "review-actions" }, discardBtn, rows.length ? confirmBtn : null)
     );
+  }
+
+  /* ------------------------------------------------------------ bank sync (Open Finance) */
+
+  const isBankSync = (imp) => imp.filenames.length === 1 && imp.filenames[0] === "Open Finance";
+
+  const BANK_STATUS = {
+    UPDATED: ["✓ atualizado", "match-ok"],
+    UPDATING: ["atualizando…", ""],
+    LOGIN_ERROR: ["⚠ reconecte no meu.pluggy.ai", "match-bad"],
+    OUTDATED: ["⚠ desatualizado: reconecte no meu.pluggy.ai", "match-bad"],
+    WAITING_USER_INPUT: ["⚠ aguardando você no meu.pluggy.ai", "match-bad"],
+  };
+
+  async function loadBank(check = false) {
+    try {
+      const prev = state.bank;
+      state.bank = await api(`/api/bank${check ? "?check=true" : ""}`);
+      // Without checking, keep the bank names and statuses already known.
+      if (!check && prev?.items.length && !state.bank.items.length) state.bank.items = prev.items;
+    } catch (_) {
+      state.bank = null;
+    }
+    renderBank();
+  }
+
+  function renderBank() {
+    const b = state.bank;
+    const el = $("#bank-status");
+    const errEl = $("#bank-error");
+    if (!b) return;
+    $("#bank-sync-btn").hidden = !b.configured;
+    $("#bank-edit-btn").textContent = b.configured ? "⚙️ Configurar" : "🔗 Conectar bancos";
+    errEl.hidden = !b.error;
+    errEl.textContent = b.error || "";
+    if (!b.configured) {
+      el.replaceChildren(
+        h("p", { class: "muted", text: "Ainda não configurado. Clique em Conectar bancos e cole o Client ID, o Client Secret e os Item IDs do dashboard.pluggy.ai." })
+      );
+      return;
+    }
+    const items = b.items.length
+      ? b.items.map((it) => {
+          const [label, cls] = BANK_STATUS[it.status] || [it.status.toLowerCase(), ""];
+          return h("li", {}, h("b", { text: it.bank }), " ", h("span", { class: cls, text: label }));
+        })
+      : b.item_ids.map((id) => h("li", { class: "muted", text: `Conexão ${id.slice(0, 8)}…` }));
+    el.replaceChildren(
+      h("ul", { class: "bank-list" }, items),
+      h("p", {
+        class: "muted",
+        text: b.last_sync
+          ? `Última sincronização: ${new Date(b.last_sync).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}. A próxima traz só o que for novo.`
+          : "Ainda não sincronizado. A primeira vez traz os últimos 90 dias.",
+      })
+    );
+  }
+
+  function toggleBankForm(show) {
+    const form = $("#bank-form");
+    form.hidden = !show;
+    if (!show) return;
+    const b = state.bank || {};
+    $("#bank-client-id").value = "";
+    $("#bank-client-id").placeholder = b.client_id || "";
+    $("#bank-client-id").required = !b.client_id;
+    $("#bank-client-secret").value = "";
+    $("#bank-client-secret").placeholder = b.has_secret ? "•••••• (deixe vazio para manter)" : "";
+    $("#bank-items").value = (b.item_ids || []).join("\n");
+    $("#bank-client-id").focus();
+  }
+
+  async function saveBank(e) {
+    e.preventDefault();
+    const btn = $("#bank-save-btn");
+    const errEl = $("#bank-error");
+    errEl.hidden = true;
+    btn.disabled = true;
+    btn.textContent = "Testando…";
+    try {
+      const res = await api(
+        "/api/bank/config",
+        jsonBody({
+          // Empty Client ID / Secret keep the saved ones.
+          client_id: $("#bank-client-id").value.trim(),
+          client_secret: $("#bank-client-secret").value.trim(),
+          item_ids: $("#bank-items").value,
+        })
+      );
+      toast(`Conectado: ${res.items.map((i) => i.bank).join(" + ")} 🎉`);
+      toggleBankForm(false);
+      state.bank = null;
+      await loadBank();
+      state.bank.items = res.items;
+      renderBank();
+    } catch (ex) {
+      errEl.textContent = validationText(ex.body?.detail) || ex.message;
+      errEl.hidden = false;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "💾 Testar e salvar";
+    }
+  }
+
+  async function syncBank() {
+    const btn = $("#bank-sync-btn");
+    $("#bank-error").hidden = true;
+    btn.disabled = true;
+    try {
+      await api("/api/bank/sync", { method: "POST" });
+      await loadImports();
+      renderImport();
+      startPolling();
+    } catch (ex) {
+      $("#bank-error").textContent = ex.message;
+      $("#bank-error").hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   function renderHistory() {
@@ -1298,6 +1441,9 @@
       addFiles(e.dataTransfer.files);
     });
     $("#upload-btn").addEventListener("click", upload);
+    $("#bank-edit-btn").addEventListener("click", () => toggleBankForm($("#bank-form").hidden));
+    $("#bank-form").addEventListener("submit", saveBank);
+    $("#bank-sync-btn").addEventListener("click", syncBank);
 
     let resizeTimer;
     let lastWidth = window.innerWidth;

@@ -777,3 +777,6 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(2px); 
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 @media (max-width: 720px) { .toast { bottom: calc(150px + env(safe-area-inset-bottom)); } }
+
+.bank-list { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.bank-list li { font-size: 14px; }
