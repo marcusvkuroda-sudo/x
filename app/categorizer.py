@@ -79,10 +79,18 @@ _BRANDS = [
 ]
 
 
-def guess_category(text: str) -> str:
+def raw_category(text: str) -> str | None:
+    """Brands our keywords can't see (mostly digits) or that other sources get wrong."""
     for pattern, category in _RAW_RULES:
         if pattern.search(text or ""):
             return category
+    return None
+
+
+def guess_category(text: str) -> str:
+    special = raw_category(text)
+    if special:
+        return special
     words = normalize(text).split()
     padded = " " + " ".join(words) + " "
     best, best_len = "outros", 0

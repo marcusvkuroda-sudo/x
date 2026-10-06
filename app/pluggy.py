@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 
 from . import config
-from .categorizer import NOT_SPENDING, clean_merchant, guess_category
+from .categorizer import NOT_SPENDING, clean_merchant, guess_category, raw_category
 from .extractor import ExtractionError
 
 API = os.environ.get("PLUGGY_API_URL", "https://api.pluggy.ai")
@@ -24,18 +24,76 @@ FIRST_SYNC_DAYS = 90
 TRANSPORT: httpx.BaseTransport | None = None  # tests swap in a fake Pluggy
 OVERLAP_DAYS = 10  # re-read a few days: banks post some transactions late
 
-# Pluggy's own categories, used when our keywords don't know the merchant.
-PLUGGY_CATEGORIES = [
-    ("supermarket", "mercado"), ("groceries", "mercado"),
-    ("restaurant", "restaurantes"), ("food delivery", "restaurantes"), ("eating out", "restaurantes"),
-    ("transport", "transporte"), ("gas station", "transporte"), ("taxi", "transporte"), ("parking", "transporte"),
-    ("pharmacy", "saude"), ("health", "saude"), ("gym", "saude"),
-    ("rent", "casa"), ("housing", "casa"), ("utilities", "casa"), ("electricity", "casa"), ("telecom", "casa"),
-    ("travel", "lazer"), ("leisure", "lazer"), ("entertainment", "lazer"), ("tickets", "lazer"),
-    ("shopping", "compras"), ("online shopping", "compras"), ("clothing", "compras"), ("electronics", "compras"),
-    ("digital services", "assinaturas"), ("streaming", "assinaturas"), ("subscription", "assinaturas"),
-    ("education", "assinaturas"),
+# Card purchases carry the merchant's MCC (the card networks' merchant category): the most
+# reliable hint there is. Ranges are inclusive.
+MCC_RANGES = [
+    ((5411, 5411), "mercado"), ((5422, 5422), "mercado"), ((5441, 5462), "mercado"), ((5499, 5499), "mercado"),
+    ((5300, 5300), "mercado"),
+    ((5811, 5814), "restaurantes"),
+    ((4111, 4131), "transporte"), ((4784, 4784), "transporte"), ((5511, 5599), "transporte"),
+    ((7511, 7549), "transporte"), ((3351, 3500), "transporte"),
+    ((5912, 5912), "saude"), ((5122, 5122), "saude"), ((8011, 8099), "saude"), ((7230, 7230), "saude"),
+    ((7297, 7298), "saude"), ((7997, 7997), "saude"), ((5975, 5977), "saude"), ((8050, 8050), "saude"),
+    ((4812, 4815), "casa"), ((4899, 4900), "casa"), ((5200, 5261), "casa"), ((5712, 5722), "casa"),
+    ((1520, 1799), "casa"), ((7623, 7699), "casa"),
+    ((3000, 3350), "lazer"), ((3501, 3999), "lazer"), ((4411, 4411), "lazer"), ((4511, 4511), "lazer"),
+    ((4722, 4722), "lazer"), ((7011, 7033), "lazer"), ((7832, 7841), "lazer"), ((7911, 7996), "lazer"),
+    ((7998, 7999), "lazer"), ((5813, 5813), "restaurantes"),
+    ((4816, 4816), "assinaturas"), ((5815, 5818), "assinaturas"), ((5968, 5968), "assinaturas"),
+    ((8211, 8299), "assinaturas"), ((7372, 7372), "assinaturas"),
+    ((5310, 5399), "compras"), ((5611, 5699), "compras"), ((5732, 5735), "compras"), ((5940, 5949), "compras"),
+    ((5970, 5974), "compras"), ((5978, 5999), "compras"), ((5045, 5045), "compras"), ((5137, 5139), "compras"),
+    ((5651, 5661), "compras"), ((5311, 5311), "compras"), ((5964, 5969), "compras"),
+    ((5995, 5995), "outros"), ((742, 742), "outros"), ((6300, 6399), "outros"), ((9311, 9399), "outros"),
+    ((6010, 6012), "outros"),
 ]
+
+# Pluggy's own categories (its names, in English), most specific first.
+PLUGGY_CATEGORIES = [
+    ("food delivery", "restaurantes"), ("eating out", "restaurantes"), ("food and drinks", "restaurantes"),
+    ("groceries", "mercado"), ("supermarket", "mercado"),
+    ("pet supplies", "outros"), ("bank fees", "outros"), ("credit card fees", "outros"), ("interests", "outros"),
+    ("late payment", "outros"), ("tax", "outros"), ("insurance", "outros"),
+    ("video streaming", "assinaturas"), ("music streaming", "assinaturas"), ("digital services", "assinaturas"),
+    ("software", "assinaturas"), ("online courses", "assinaturas"), ("education", "assinaturas"),
+    ("university", "assinaturas"), ("school", "assinaturas"), ("gaming", "assinaturas"),
+    ("telecommunications", "casa"), ("internet", "casa"), ("mobile", "casa"), ("tv", "casa"), ("rent", "casa"),
+    ("housing", "casa"), ("utilities", "casa"), ("water", "casa"), ("electricity", "casa"), ("houseware", "casa"),
+    ("urban land", "casa"),
+    ("pharmacy", "saude"), ("dentist", "saude"), ("optometry", "saude"), ("hospital", "saude"),
+    ("healthcare", "saude"), ("gyms", "saude"), ("wellness", "saude"), ("sports practice", "saude"),
+    ("airport", "lazer"), ("airlines", "lazer"), ("accomodation", "lazer"), ("accommodation", "lazer"),
+    ("travel", "lazer"), ("bus tickets", "lazer"), ("tickets", "lazer"), ("cinema", "lazer"), ("museums", "lazer"),
+    ("stadiums", "lazer"), ("leisure", "lazer"),
+    ("taxi", "transporte"), ("ride-hailing", "transporte"), ("public transportation", "transporte"),
+    ("car rental", "transporte"), ("gas station", "transporte"), ("parking", "transporte"), ("tolls", "transporte"),
+    ("vehicle", "transporte"), ("automotive", "transporte"), ("transportation", "transporte"),
+    ("bicycle", "transporte"), ("traffic", "transporte"),
+    ("online shopping", "compras"), ("electronics", "compras"), ("clothing", "compras"), ("kids and toys", "compras"),
+    ("bookstore", "compras"), ("sports goods", "compras"), ("office supplies", "compras"), ("shopping", "compras"),
+]
+
+# Bank account: only purchases with the debit card count (parking, a coffee). Pix, boletos,
+# transfers, deposits and the like are left out: big payments are registered as fixed expenses.
+_DEBIT_CARD = re.compile(
+    r"compra\s+(no\s+|com\s+)?(cart[aã]o\s+(de\s+)?)?d[eé]b|compra\s+(no\s+)?cart[aã]o|cart[aã]o\s+d[eé]b|"
+    r"\bdeb(ito)?\s+(visa|master|elo)|visa\s+electron|maestro|elo\s+d[eé]b",
+    re.IGNORECASE,
+)
+_NOT_A_PURCHASE = re.compile(r"\bpix\b|boleto|\bted\b|\bdoc\b|transf|pagamento|pagto|pgto|saque|dep[oó]sito", re.IGNORECASE)
+_TRANSFER_METHODS = {"PIX", "TED", "DOC", "TEF", "BOLETO"}
+
+
+def _debit_card_purchase(t: dict, description: str) -> bool:
+    op = (t.get("operationType") or "").upper()
+    if op == "CARTAO":
+        return True
+    if op and op != "OUTROS":
+        return False  # PIX, BOLETO, TED, TRANSFERENCIA_..., SAQUE, TARIFA_...
+    payment = t.get("paymentData") or {}
+    if (payment.get("paymentMethod") or "").upper() in _TRANSFER_METHODS or payment.get("boletoMetadata"):
+        return False
+    return bool(_DEBIT_CARD.search(description)) and not _NOT_A_PURCHASE.search(description)
 
 
 class SyncError(ExtractionError):
@@ -213,15 +271,31 @@ def describe_items(client: Client, item_ids: list[str]) -> list[dict]:
 # ---------------------------------------------------------------- sync
 
 
-def _category(description: str, pluggy_category: str | None) -> str:
-    ours = guess_category(description)
-    if ours != "outros" or not pluggy_category:
-        return ours
-    low = pluggy_category.lower()
-    for word, category in PLUGGY_CATEGORIES:
-        if word in low:
+def _mcc_category(mcc) -> str | None:
+    try:
+        code = int(mcc)
+    except (TypeError, ValueError):
+        return None
+    for (low, high), category in MCC_RANGES:
+        if low <= code <= high:
             return category
-    return "outros"
+    return None
+
+
+def _category(description: str, t: dict) -> str:
+    """Known brands first (99Food is food, not a ride), then the merchant's MCC, Pluggy's
+    category and, last, our keywords. Corrections the couple made still win over all of it."""
+    special = raw_category(description)
+    if special:
+        return special
+    mcc = _mcc_category((t.get("creditCardMetadata") or {}).get("payeeMCC"))
+    if mcc:
+        return mcc
+    low = (t.get("category") or "").lower()
+    for word, category in PLUGGY_CATEGORIES:
+        if re.search(rf"\b{re.escape(word)}\b", low):
+            return category
+    return guess_category(description)
 
 
 def _month(text) -> str | None:
@@ -257,38 +331,16 @@ def _bill_schedule(client: Client, account: dict):
     return by_id, open_bill
 
 
-# Bank account lines say how the money left before saying where it went.
-_HOW = re.compile(
-    r"^(pix\s+(enviado|transf\w*)|transfer[eê]ncia\s+(pix\s+)?enviada|compra\s+(no\s+)?(d[eé]bito|cart[aã]o)|"
-    r"pagamento\s+(de\s+)?(boleto|conta|efetuado)|pagto\s+boleto|d[eé]bito\s+autom[aá]tico)\s*[-:–]?\s*",
-    re.IGNORECASE,
-)
-_REFUND = re.compile(r"estorno|reembolso|devolu[cç][aã]o|cashback", re.IGNORECASE)
-# Pluggy's own labels for money that is not spending.
-_NOT_SPENDING_CATEGORY = re.compile(r"credit card payment|same person|investment", re.IGNORECASE)
-TRANSFER_DAYS = 3
-
-
-def _payee(description: str) -> str:
-    return _HOW.sub("", description).strip() or description
-
-
-def _days_apart(a: str, b: str) -> int:
-    try:
-        return abs((date.fromisoformat(a) - date.fromisoformat(b)).days)
-    except ValueError:
-        return 999
-
-
 def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str]) -> dict:
-    """Spending in the given connections since a date, skipping what was already imported.
+    """Card purchases (and debit card purchases from the accounts) since a date, skipping what
+    was already imported.
 
     Returns the same shape as the statement readers, plus bill_updates: the statement month of
     entries imported before their bill closed, now that it is known.
     """
     transactions, warnings, banks = [], [], []
-    incoming = []  # money that came into one of the accounts: (account id, date, cents, label)
     bill_updates = {}
+    left_out = 0
     for item in describe_items(client, item_ids):
         banks.append(item["bank"])
         if item["status"] in ("LOGIN_ERROR", "OUTDATED", "WAITING_USER_INPUT", "ERROR"):
@@ -299,28 +351,32 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
         for account in client.paged("/accounts", itemId=item["id"]):
             card = account.get("type") == "CREDIT"
             bill_by_id, open_bill = _bill_schedule(client, account) if card else ({}, lambda _d: None)
-            source = f"{item['bank']} {'cartão' if card else 'conta'}"
+            source = f"{item['bank']} {'cartão' if card else 'débito'}"
             for t in client.cursor("/v2/transactions", accountId=account["id"], dateFrom=since.isoformat()):
                 if not t.get("id") or (t.get("status") or "POSTED") == "PENDING":
                     continue
                 ext_id = f"pluggy:{t['id']}"
                 tx_date = str(t.get("date", ""))[:10]
                 meta = t.get("creditCardMetadata") or {}
-                bill_month = bill_by_id.get(meta.get("billId") or "") if card else None
-                description = re.sub(r"\s+", " ", t.get("description") or t.get("descriptionRaw") or "").strip()
-                cents = int(round(abs(float(t.get("amount") or 0)) * 100))
-                outgoing = (t.get("type") or "").upper() == "DEBIT"
-                if not outgoing and cents and not (card and _REFUND.search(description)):
-                    incoming.append((account["id"], tx_date, cents, source))
+                bill_month = None
+                if card:
+                    bill_month = bill_by_id.get(meta.get("billId") or "") or _month(meta.get("billForecastDate"))
                 if ext_id in known_ids:
                     if bill_month:
                         bill_updates[ext_id] = bill_month
                     continue
+                description = re.sub(r"\s+", " ", t.get("description") or t.get("descriptionRaw") or "").strip()
+                cents = int(round(abs(float(t.get("amount") or 0)) * 100))
                 if not description or not cents or NOT_SPENDING.search(description):
                     continue
-                if not outgoing:
-                    if not card:
-                        continue  # money coming into the account (salary, Pix received): not spending
+                outgoing = (t.get("type") or "").upper() == "DEBIT"
+                if not card:
+                    if not outgoing:
+                        continue  # money coming in: not spending
+                    if not _debit_card_purchase(t, description):
+                        left_out += 1
+                        continue
+                elif not outgoing:
                     cents = -cents  # refund / credit on the card
                 installment = None
                 k, n = meta.get("installmentNumber"), meta.get("totalInstallments")
@@ -330,53 +386,25 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
                 purchase = str(meta.get("purchaseDate") or "")[:10]
                 if purchase and purchase != tx_date:
                     notes.append(f"data da compra: {purchase}")
-                # A bare "Pix enviado": the receiver's name says where the money went.
-                receiver = (((t.get("paymentData") or {}).get("receiver") or {}).get("name") or "").strip()
-                if receiver and not _HOW.sub("", description).strip():
-                    description = f"{description} - {receiver}"
                 payee = (t.get("merchant") or {}).get("name") or ""
-                row = {
-                    "date": tx_date,
-                    "description": description[:300],
-                    "merchant": clean_merchant(payee or _payee(description))[:200],
-                    "amount_cents": cents,
-                    "category": _category(description, t.get("category")),
-                    "installment": installment,
-                    "notes": " · ".join(notes),
-                    "source": source,
-                    "external_id": ext_id,
-                    "bill_month": bill_month or (open_bill(tx_date) if card else None),
-                    "suggest_skip": None,
-                }
-                if not card and outgoing and _NOT_SPENDING_CATEGORY.search(t.get("category") or ""):
-                    row["suggest_skip"] = "parece pagamento de fatura, investimento ou transferência entre suas contas"
-                row["_account"], row["_card"] = account["id"], card
-                transactions.append(row)
-
-    # Money leaving one account and arriving at another of yours (a Pix between your banks, the
-    # card bill paid from the other bank) is not spending. Same value within a few days: suggest
-    # leaving it out, but let the couple decide (it could be a coincidence).
-    used = set()
-    for row in sorted(transactions, key=lambda r: r["date"]):
-        if row["suggest_skip"] or row["amount_cents"] <= 0 or row["_card"]:
-            continue
-        for i, (account_id, when, cents, label) in enumerate(incoming):
-            if i in used or account_id == row["_account"] or cents != row["amount_cents"]:
-                continue
-            if _days_apart(when, row["date"]) <= TRANSFER_DAYS:
-                used.add(i)
-                row["suggest_skip"] = (
-                    f"parece o pagamento da fatura do {label}" if label.endswith("cartão")
-                    else f"o mesmo valor entrou em {label}: parece transferência entre suas contas"
+                transactions.append(
+                    {
+                        "date": tx_date,
+                        "description": description[:300],
+                        "merchant": clean_merchant(payee or _DEBIT_PREFIX.sub("", description) or description)[:200],
+                        "amount_cents": cents,
+                        "category": _category(description, t),
+                        "installment": installment,
+                        "notes": " · ".join(notes),
+                        "source": source,
+                        "external_id": ext_id,
+                        "bill_month": bill_month or (open_bill(tx_date) if card else None),
+                    }
                 )
-                break
-    for row in transactions:
-        del row["_account"], row["_card"]
-    flagged = sum(1 for r in transactions if r["suggest_skip"])
-    if flagged:
+    if left_out:
         warnings.append(
-            f"{flagged} lançamento(s) parecem transferência entre suas contas ou pagamento de fatura "
-            "e vieram desmarcados. Marque se forem gastos de verdade."
+            f"{left_out} movimentação(ões) da conta (Pix, boletos, transferências) ficaram de fora: "
+            "da conta só entram compras no cartão de débito. Aluguel e contas vão em Gastos fixos."
         )
     return {
         "document_type": "open_finance",
@@ -391,6 +419,13 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
         "input_tokens": None,
         "output_tokens": None,
     }
+
+
+# "COMPRA CARTAO DEBITO - ESTAPAR" -> "ESTAPAR"
+_DEBIT_PREFIX = re.compile(
+    r"^(compra\s+(no\s+|com\s+)?(cart[aã]o\s+(de\s+)?)?d[eé]bito|compra\s+(no\s+)?cart[aã]o(\s+d[eé]bito)?)\s*[-:–]?\s*",
+    re.IGNORECASE,
+)
 
 
 def sync_since(last_sync: str | None) -> date:

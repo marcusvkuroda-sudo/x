@@ -19,6 +19,7 @@
       <nav class="tabs" aria-label="Seções">
         <button class="tab" data-view="dashboard"><span class="tab-icon">📊</span>Painel</button>
         <button class="tab" data-view="transactions"><span class="tab-icon">🧾</span>Lançamentos</button>
+        <button class="tab" data-view="fixed"><span class="tab-icon">🔁</span>Fixos</button>
         <button class="tab" data-view="import"><span class="tab-icon">📥</span>Importar <span class="badge" id="import-badge" hidden></span></button>
       </nav>
       <button class="btn btn-primary btn-sm top-new" data-action="new-tx">＋ Novo gasto</button>
@@ -148,6 +149,76 @@
         <a class="btn" href="/api/export.csv" download>⬇️ Exportar CSV</a>
       </div>
       <div id="tx-container"></div>
+    </section>
+
+    <!-- ======================================================== FIXED -->
+    <section id="view-fixed" hidden>
+      <div class="grid">
+        <div class="card span-5">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title" id="fixed-form-title">Novo gasto fixo</h2>
+              <p class="card-sub">Aluguel, condomínio, internet, escola… Cadastre uma vez e ele entra sozinho em todos os meses.</p>
+            </div>
+          </div>
+          <form id="fixed-form">
+            <label class="field">
+              <span>Descrição</span>
+              <input class="input" id="fx-desc" required maxlength="300" placeholder="ex.: Aluguel">
+            </label>
+            <div class="form-row">
+              <label class="field">
+                <span>Valor por mês (R$)</span>
+                <input class="input" id="fx-amount" inputmode="decimal" required placeholder="0,00">
+              </label>
+              <label class="field">
+                <span>Categoria</span>
+                <select class="input" id="fx-cat"></select>
+              </label>
+            </div>
+            <div class="form-row">
+              <label class="field">
+                <span>Dia do mês</span>
+                <input class="input" id="fx-day" type="number" min="1" max="31" value="5" required>
+              </label>
+              <label class="field">
+                <span>Cartão / conta (opcional)</span>
+                <input class="input" id="fx-source" list="sources-list" placeholder="ex.: Inter">
+              </label>
+            </div>
+            <div class="form-row">
+              <label class="field">
+                <span>A partir de</span>
+                <input class="input" id="fx-start" type="month" required>
+              </label>
+              <label class="field">
+                <span>Até (opcional)</span>
+                <input class="input" id="fx-end" type="month">
+                <small>Vazio = sem data para acabar.</small>
+              </label>
+            </div>
+            <label class="check" id="fx-past-wrap" style="margin-top:12px" hidden>
+              <input type="checkbox" id="fx-past">
+              <span>Corrigir também os meses que já passaram (senão a mudança vale deste mês em diante)</span>
+            </label>
+            <div class="notice error" id="fixed-error" style="margin-top:12px" hidden></div>
+            <div style="margin-top:16px; display:flex; gap:8px; justify-content:flex-end">
+              <button class="btn btn-ghost" id="fixed-cancel" type="button" hidden>Cancelar</button>
+              <button class="btn btn-primary" id="fixed-save" type="submit">💾 Salvar gasto fixo</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card span-7">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">Gastos fixos</h2>
+              <p class="card-sub" id="fixed-sub">Entram como lançamento em cada mês; dá para editar um mês específico em Lançamentos.</p>
+            </div>
+          </div>
+          <div class="history" id="fixed-list"></div>
+        </div>
+      </div>
     </section>
 
     <!-- ======================================================== IMPORT -->

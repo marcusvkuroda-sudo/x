@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import config, db, documents, extractor, local_reader, pluggy, rules
+from . import config, db, documents, extractor, fixed, local_reader, pluggy, rules
 from .categories import CATEGORIES, CATEGORY_KEYS
 
 CategoryKey = Literal[tuple(CATEGORY_KEYS)]  # type: ignore[valid-type]
@@ -163,6 +163,7 @@ def meta():
 @app.get("/api/transactions")
 def list_transactions():
     with db.session() as conn:
+        fixed.materialize(conn)  # a new month started: its fixed expenses appear
         # bill_month: the month of the statement an entry was charged on (its due month), so the
         # dashboard can add things up exactly like the bank's statements. Manual entries count
         # in the month of their own date.
@@ -466,6 +467,90 @@ def delete_import(import_id: int):
         if conn.execute("DELETE FROM imports WHERE id = ?", (import_id,)).rowcount == 0:
             raise HTTPException(404, "Importação não encontrada.")
     shutil.rmtree(config.UPLOAD_DIR / str(import_id), ignore_errors=True)
+
+
+# ---------------------------------------------------------------- fixed expenses
+
+MonthStr = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+class FixedIn(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    description: str = Field(min_length=1, max_length=300)
+    amount_cents: int = Field(gt=0)
+    category: CategoryKey = "casa"
+    day: int = Field(default=1, ge=1, le=31)
+    start_month: str = MonthStr
+    end_month: str | None = Field(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    source: str = Field(default="", max_length=100)
+    notes: str = Field(default="", max_length=500)
+
+    @field_validator("end_month")
+    @classmethod
+    def empty_is_none(cls, v: str | None) -> str | None:
+        return v or None
+
+
+def _check_period(f: FixedIn) -> None:
+    if f.end_month and f.end_month < f.start_month:
+        raise HTTPException(422, "O mês final precisa ser depois do mês inicial.")
+
+
+def _fixed_row(conn, fixed_id: int) -> dict:
+    row = conn.execute("SELECT * FROM fixed_expenses WHERE id = ?", (fixed_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Gasto fixo não encontrado.")
+    return dict(row)
+
+
+@app.get("/api/fixed")
+def list_fixed():
+    with db.session() as conn:
+        rows = conn.execute("SELECT * FROM fixed_expenses ORDER BY amount_cents DESC, id").fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/fixed", status_code=201)
+def create_fixed(f: FixedIn):
+    _check_period(f)
+    with db.session() as conn:
+        cur = conn.execute(
+            """INSERT INTO fixed_expenses (description, amount_cents, category, day, start_month, end_month, source, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (f.description, f.amount_cents, f.category, f.day, f.start_month, f.end_month, f.source, f.notes),
+        )
+        created = fixed.materialize(conn)
+        return {**_fixed_row(conn, cur.lastrowid), "created_entries": created}
+
+
+@app.put("/api/fixed/{fixed_id}")
+def update_fixed(fixed_id: int, f: FixedIn, apply_to_past: bool = False):
+    """Changes apply from the current month on; with apply_to_past, to the months before too."""
+    _check_period(f)
+    db.backup_daily()
+    with db.session() as conn:
+        _fixed_row(conn, fixed_id)
+        conn.execute(
+            """UPDATE fixed_expenses SET description = ?, amount_cents = ?, category = ?, day = ?, start_month = ?,
+               end_month = ?, source = ?, notes = ? WHERE id = ?""",
+            (f.description, f.amount_cents, f.category, f.day, f.start_month, f.end_month, f.source, f.notes, fixed_id),
+        )
+        fixed.apply_changes(conn, fixed_id, None if apply_to_past else fixed.month_key(Date.today()))
+        return _fixed_row(conn, fixed_id)
+
+
+@app.delete("/api/fixed/{fixed_id}", status_code=204)
+def delete_fixed(fixed_id: int, remove_entries: bool = False):
+    """Stops a fixed expense. The months already created stay (they were paid) unless remove_entries."""
+    db.backup_daily()
+    with db.session() as conn:
+        _fixed_row(conn, fixed_id)
+        if remove_entries:
+            conn.execute("DELETE FROM transactions WHERE fixed_id = ?", (fixed_id,))
+        else:
+            conn.execute("UPDATE transactions SET fixed_id = NULL WHERE fixed_id = ?", (fixed_id,))
+        conn.execute("DELETE FROM fixed_expenses WHERE id = ?", (fixed_id,))
 
 
 # ---------------------------------------------------------------- bank sync (Open Finance)

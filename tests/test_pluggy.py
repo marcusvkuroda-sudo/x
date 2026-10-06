@@ -26,20 +26,29 @@ CARD_TXS = [
      "status": "POSTED"},
     {"id": "c8", "date": "2026-09-29T10:00:00.000Z", "description": "NETFLIX", "amount": 55.9, "type": "DEBIT",
      "status": "POSTED"},
+    # The merchant's MCC says what it is, even when the name and Pluggy don't.
+    {"id": "c9", "date": "2026-09-08T10:00:00.000Z", "description": "ESTAB XPTO 77", "amount": 64.0, "type": "DEBIT",
+     "status": "POSTED", "category": "Shopping", "creditCardMetadata": {"payeeMCC": 5812}},
+    # Bill forecast given by the bank wins over our guess.
+    {"id": "c10", "date": "2026-09-21T10:00:00.000Z", "description": "PADARIA REAL", "amount": 18.0, "type": "DEBIT",
+     "status": "POSTED", "creditCardMetadata": {"billForecastDate": "2026-12"}},
 ]
 ACCOUNT_TXS = [
-    {"id": "a1", "date": "2026-09-01", "description": "Pix enviado - Padaria", "amount": -15.5, "type": "DEBIT"},
+    {"id": "a1", "date": "2026-09-01", "description": "Pix enviado - Padaria", "amount": -15.5, "type": "DEBIT",
+     "operationType": "PIX"},
     {"id": "a2", "date": "2026-09-01", "description": "Salário", "amount": 5000.0, "type": "CREDIT"},
     {"id": "a3", "date": "2026-09-02", "description": "Aplicação CDB", "amount": -1000.0, "type": "DEBIT"},
     {"id": "a4", "date": "2026-09-10", "description": "Pagamento fatura cartão", "amount": -1500.0, "type": "DEBIT"},
-    # The Santander card bill paid from Inter by boleto (the card shows "PAGAMENTO DE FATURA" c4).
     {"id": "a5", "date": "2026-09-04", "description": "Pagamento de boleto - BANCO SANTANDER", "amount": -1500.0,
      "type": "DEBIT"},
-    # Pix to our own Santander account (s1 below), and a bare Pix with the receiver apart.
-    {"id": "a6", "date": "2026-09-11", "description": "Pix enviado", "amount": -500.0, "type": "DEBIT",
-     "paymentData": {"receiver": {"name": "Fulano de Tal"}}},
-    {"id": "a7", "date": "2026-09-12", "description": "Pix enviado", "amount": -42.0, "type": "DEBIT",
-     "paymentData": {"receiver": {"name": "Feira do Bairro"}}},
+    {"id": "a6", "date": "2026-09-05", "description": "Aluguel setembro", "amount": -3200.0, "type": "DEBIT",
+     "paymentData": {"paymentMethod": "PIX"}},
+    {"id": "a9", "date": "2026-09-06", "description": "PAGAMENTO CONTA LUZ", "amount": -230.0, "type": "DEBIT",
+     "operationType": "OUTROS"},
+    # Debit card purchases: these come in.
+    {"id": "a7", "date": "2026-09-12", "description": "COMPRA CARTAO DEBITO - ESTAPAR", "amount": -25.0,
+     "type": "DEBIT", "operationType": "CARTAO"},
+    {"id": "a8", "date": "2026-09-13", "description": "COMPRA NO DEBITO PADARIA BELA", "amount": -12.0, "type": "DEBIT"},
 ]
 SANTANDER_ACCOUNT_TXS = [
     {"id": "s1", "date": "2026-09-12", "description": "Pix recebido", "amount": 500.0, "type": "CREDIT"},
@@ -98,38 +107,40 @@ def calls(monkeypatch):
     return log
 
 
-def test_fetch_keeps_only_spending(calls):
+def test_fetch_keeps_card_purchases_only(calls):
     from datetime import date
 
     with pluggy.Client("id", "segredo") as client:
         result = pluggy.fetch(client, ["inter", "santander"], date(2026, 8, 1), known_ids={"pluggy:c6", "pluggy:c1"})
     by_id = {t["external_id"]: t for t in result["transactions"]}
-    assert set(by_id) == {"pluggy:a1", "pluggy:a5", "pluggy:a6", "pluggy:a7", "pluggy:c2", "pluggy:c3",
-                          "pluggy:c7", "pluggy:c8"}
-    assert by_id["pluggy:a1"]["amount_cents"] == 1550 and by_id["pluggy:a1"]["source"] == "Banco Inter conta"
-    assert by_id["pluggy:a1"]["merchant"] == "Padaria"
+    # From the accounts only the debit card purchases: no Pix, boleto, rent, bills or income.
+    assert set(by_id) == {"pluggy:a7", "pluggy:a8", "pluggy:c2", "pluggy:c3", "pluggy:c7", "pluggy:c8",
+                          "pluggy:c9", "pluggy:c10"}
+    assert any("4 movimenta" in w and "Gastos fixos" in w for w in result["warnings"])
+    assert by_id["pluggy:a7"]["amount_cents"] == 2500 and by_id["pluggy:a7"]["source"] == "Banco Inter débito"
+    assert by_id["pluggy:a7"]["merchant"] == "Estapar" and by_id["pluggy:a7"]["category"] == "transporte"
+    assert by_id["pluggy:a8"]["merchant"] == "Padaria Bela"
     assert by_id["pluggy:c2"]["installment"] == "2/10" and by_id["pluggy:c2"]["bill_month"] == "2026-10"
     assert by_id["pluggy:c3"]["amount_cents"] == -3990 and by_id["pluggy:c2"]["date"] == "2026-09-03"
     assert result["issuer"] == "Banco Inter + Santander"
     assert any("Santander" in w and "renovada" in w for w in result["warnings"])
-    # Open bill: statement month from the card's closing and due dates.
+    # Open bill: statement month from the bank's forecast, else from the closing and due dates.
+    assert by_id["pluggy:c10"]["bill_month"] == "2026-12"
     assert by_id["pluggy:c7"]["bill_month"] == "2026-11" and by_id["pluggy:c8"]["bill_month"] == "2026-12"
     # Imported before its bill closed: its statement month is now known.
     assert result["bill_updates"] == {"pluggy:c1": "2026-09"}
-    # Money between our own accounts comes unchecked; real spending doesn't.
-    assert by_id["pluggy:a5"]["suggest_skip"] == "parece o pagamento da fatura do Santander cartão"
-    assert "Santander conta" in by_id["pluggy:a6"]["suggest_skip"]  # Pix to our own account
-    assert by_id["pluggy:a7"]["suggest_skip"] is None and by_id["pluggy:a1"]["suggest_skip"] is None
-    assert by_id["pluggy:a7"]["description"] == "Pix enviado - Feira do Bairro"
-    assert by_id["pluggy:a7"]["merchant"] == "Feira do Bairro"
 
 
-def test_pluggy_category_used_when_keywords_unknown(calls):
+def test_categories_prefer_mcc_then_pluggy(calls):
     from datetime import date
 
     with pluggy.Client("id", "segredo") as client:
         result = pluggy.fetch(client, ["santander"], date(2026, 8, 1), set())
-    assert {t["external_id"]: t for t in result["transactions"]}["pluggy:c6"]["category"] == "mercado"
+    cat = {t["external_id"]: t["category"] for t in result["transactions"]}
+    assert cat["pluggy:c9"] == "restaurantes"  # MCC 5812 beats Pluggy's "Shopping"
+    assert cat["pluggy:c6"] == "mercado"  # Pluggy's "Supermarket"
+    assert cat["pluggy:c1"] == "restaurantes"  # 99Food, whatever the rest says
+    assert cat["pluggy:c7"] == "saude"  # our keywords, when nothing else knows
 
 
 def test_config_rejects_bad_credentials_and_unknown_items(client, calls):
@@ -165,16 +176,16 @@ def test_sync_end_to_end(client, calls):
     second = wait(client, client.post("/api/bank/sync").json()["id"])
     assert second["transactions"] == []
 
-    # Import everything but the transfers between our accounts (as the review screen suggests).
+    # Import all but one (left unchecked in the review).
     payload = [{**{k: t[k] for k in ("date", "description", "merchant", "amount_cents", "category", "installment",
                                       "notes", "source", "external_id", "bill_month")}, "remember": False}
-               for t in rows if not t["suggest_skip"]]
+               for t in rows if t["external_id"] != "pluggy:c8"]
     r = client.post(f"/api/imports/{import_id}/confirm", json={"source": "", "transactions": payload})
-    assert r.json()["imported"] == 8
+    assert r.json()["imported"] == 9
     txs = {t["external_id"]: t for t in client.get("/api/transactions").json()}
     assert txs["pluggy:c2"]["bill_month"] == "2026-10"
-    assert txs["pluggy:a1"]["bill_month"] == "2026-09"  # bank account: month of the date
-    assert txs["pluggy:a1"]["source"] == "Banco Inter conta"
+    assert txs["pluggy:a7"]["bill_month"] == "2026-09"  # debit: month of the date
+    assert txs["pluggy:a7"]["source"] == "Banco Inter débito"
 
     # Next sync: everything is known already, including what was left unchecked.
     third = wait(client, client.post("/api/bank/sync").json()["id"])

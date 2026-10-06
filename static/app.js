@@ -16,6 +16,7 @@
     ["all", "Tudo"],
   ];
   const TX_PAGE = 150;
+  const VIEWS = ["dashboard", "transactions", "fixed", "import"];
 
   const state = {
     meta: { categories: [], sources: [] },
@@ -37,6 +38,8 @@
     txLimit: TX_PAGE,
     basis: "bill", // "bill": month of the statement · "purchase": purchase date
     bank: null, // Open Finance settings (never includes the secret)
+    fixed: [],
+    editingFixed: null,
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -169,17 +172,19 @@
 
   function setView(view) {
     state.view = view;
-    for (const v of ["dashboard", "transactions", "import"]) $(`#view-${v}`).hidden = v !== view;
+    for (const v of VIEWS) $(`#view-${v}`).hidden = v !== view;
     document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-current", t.dataset.view === view ? "page" : "false"));
     if (location.hash !== `#${view}`) history.replaceState(null, "", `#${view}`);
     window.Charts.tooltip.hide();
     render();
     if (view === "import") loadBank(true);
+    if (view === "fixed") safely(loadFixed)();
   }
 
   function render() {
     if (state.view === "dashboard") renderDashboard();
     else if (state.view === "transactions") renderTransactions();
+    else if (state.view === "fixed") renderFixed();
     else renderImport();
   }
 
@@ -666,7 +671,7 @@
       shown += visible.length;
       const rows = visible.map((t) => {
         const c = cmap[t.category] || cmap.outros;
-        const meta = [fmtDay.format(parseDate(t.date)), c.label, t.source, t.installment && `parcela ${t.installment}`, t.notes].filter(Boolean).join(" · ");
+        const meta = [fmtDay.format(parseDate(t.date)), c.label, t.origin === "fixed" && "🔁 fixo", t.source, t.installment && `parcela ${t.installment}`, t.notes].filter(Boolean).join(" · ");
         return h(
           "button",
           { class: "tx", type: "button", onclick: () => openTxModal(t) },
@@ -993,7 +998,7 @@
       state.review[id] = {
         source: detail.source || detail.issuer || "",
         rows: detail.transactions.map((t) => ({
-          include: !t.possible_duplicate && !t.suggest_skip,
+          include: !t.possible_duplicate,
           date: t.date,
           description: t.description,
           merchant: t.merchant,
@@ -1007,7 +1012,6 @@
           source: t.source || "",
           external_id: t.external_id || null,
           bill_month: t.bill_month || null,
-          skipReason: t.suggest_skip || null,
         })),
       };
     }
@@ -1104,7 +1108,6 @@
       if (parseAmount(r.amount) < 0) tags.push(h("span", { class: "tag info", text: "estorno/crédito" }));
       if (r.dup) tags.push(h("span", { class: "tag", text: `possível duplicado de “${r.dup}”` }));
       if (bank && r.source) tags.push(h("span", { class: "tag info", text: r.source }));
-      if (r.skipReason) tags.push(h("span", { class: "tag", text: r.skipReason }));
       if (r.notes) tags.push(h("span", { class: "tag info", text: r.notes }));
       tr.append(h("td", {}, check), h("td", {}, dateIn), h("td", { class: "desc-cell" }, descIn, tags.length ? h("div", {}, tags) : null), h("td", {}, catSel), h("td", {}, amtIn));
       return tr;
@@ -1217,6 +1220,132 @@
       errEl,
       h("div", { class: "review-actions" }, discardBtn, rows.length ? confirmBtn : null)
     );
+  }
+
+  /* ------------------------------------------------------------ fixed expenses */
+
+  async function loadFixed() {
+    state.fixed = await api("/api/fixed");
+    renderFixed();
+  }
+
+  function renderFixed() {
+    const cmap = catMap();
+    const sel = $("#fx-cat");
+    if (!sel.options.length) sel.append(...state.meta.categories.map((c) => h("option", { value: c.key, text: `${c.icon} ${c.label}` })));
+    if (!state.editingFixed && !$("#fx-start").value) resetFixedForm();
+    const current = monthKey(today());
+    const active = state.fixed.filter((f) => f.start_month <= current && (!f.end_month || f.end_month >= current));
+    $("#fixed-sub").textContent = state.fixed.length
+      ? `${fmt(sum(active))} por mês em ${plural(active.length, "gasto fixo ativo", "gastos fixos ativos")}`
+      : "Entram como lançamento em cada mês; dá para editar um mês específico em Lançamentos.";
+    const short = (m) => `${MONTHS_SHORT[+m.slice(5, 7) - 1]}/${m.slice(0, 4)}`;
+    $("#fixed-list").replaceChildren(
+      ...(state.fixed.length
+        ? state.fixed.map((f) => {
+            const c = cmap[f.category] || cmap.outros;
+            const ended = f.end_month && f.end_month < current;
+            const meta = [
+              c.label,
+              `todo dia ${f.day}`,
+              `desde ${short(f.start_month)}`,
+              f.end_month && `até ${short(f.end_month)}`,
+              f.source,
+              ended && "encerrado",
+            ].filter(Boolean);
+            const edit = h("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Editar", onclick: () => editFixed(f) });
+            const del = h("button", { class: "btn btn-sm btn-ghost btn-danger", type: "button", text: "Excluir", onclick: safely(() => deleteFixed(f)) });
+            return h(
+              "div",
+              { class: "history-row fixed-row", style: ended ? "opacity:.6" : "" },
+              h("span", { class: "cat-bubble", style: `--c:${catColor(c.key)}`, text: c.icon }),
+              h("div", { style: "min-width:0" }, h("div", { class: "title", text: f.description }), h("div", { class: "meta", text: meta.join(" · ") })),
+              h("b", { class: "num", text: fmt(f.amount_cents) }),
+              h("div", { class: "fixed-actions" }, edit, del)
+            );
+          })
+        : [h("p", { class: "muted", text: "Nenhum gasto fixo ainda. Cadastre aluguel, condomínio, internet, plano de saúde… ao lado." })])
+    );
+  }
+
+  function resetFixedForm() {
+    state.editingFixed = null;
+    $("#fixed-form").reset();
+    $("#fx-cat").value = "casa";
+    $("#fx-day").value = 5;
+    $("#fx-start").value = monthKey(today());
+    $("#fixed-form-title").textContent = "Novo gasto fixo";
+    $("#fixed-cancel").hidden = true;
+    $("#fx-past-wrap").hidden = true;
+    $("#fixed-error").hidden = true;
+  }
+
+  function editFixed(f) {
+    state.editingFixed = f;
+    $("#fx-desc").value = f.description;
+    $("#fx-amount").value = amountInput(f.amount_cents);
+    $("#fx-cat").value = f.category;
+    $("#fx-day").value = f.day;
+    $("#fx-source").value = f.source;
+    $("#fx-start").value = f.start_month;
+    $("#fx-end").value = f.end_month || "";
+    $("#fx-past").checked = false;
+    $("#fx-past-wrap").hidden = false;
+    $("#fixed-form-title").textContent = `Editar: ${f.description}`;
+    $("#fixed-cancel").hidden = false;
+    $("#fixed-error").hidden = true;
+    $("#fx-desc").scrollIntoView({ behavior: "smooth", block: "center" });
+    $("#fx-desc").focus({ preventScroll: true });
+  }
+
+  async function saveFixed(e) {
+    e.preventDefault();
+    const errEl = $("#fixed-error");
+    errEl.hidden = true;
+    const cents = parseAmount($("#fx-amount").value);
+    if (!cents || isNaN(cents) || cents < 0) {
+      errEl.textContent = "Informe um valor válido (ex.: 3.200,00).";
+      errEl.hidden = false;
+      return;
+    }
+    const payload = {
+      description: $("#fx-desc").value.trim(),
+      amount_cents: cents,
+      category: $("#fx-cat").value,
+      day: +$("#fx-day").value,
+      start_month: $("#fx-start").value,
+      end_month: $("#fx-end").value || null,
+      source: $("#fx-source").value.trim(),
+    };
+    const editing = state.editingFixed;
+    const btn = $("#fixed-save");
+    btn.disabled = true;
+    try {
+      if (editing) {
+        const past = $("#fx-past").checked ? "?apply_to_past=true" : "";
+        await api(`/api/fixed/${editing.id}${past}`, jsonBody(payload, "PUT"));
+        toast("Gasto fixo atualizado");
+      } else {
+        const res = await api("/api/fixed", jsonBody(payload));
+        toast(res.created_entries ? `Gasto fixo criado e lançado em ${plural(res.created_entries, "mês", "meses")} 🔁` : "Gasto fixo criado: entra quando o mês chegar 🔁");
+      }
+      resetFixedForm();
+      await Promise.all([loadFixed(), loadTxs()]);
+    } catch (ex) {
+      errEl.textContent = validationText(ex.body?.detail) || ex.message;
+      errEl.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function deleteFixed(f) {
+    if (!confirm(`Parar o gasto fixo “${f.description}”? Ele deixa de entrar nos próximos meses.`)) return;
+    const removeAll = confirm("Apagar também os lançamentos dos meses que já passaram?\n\nOK = apagar tudo · Cancelar = manter o que já foi lançado");
+    await api(`/api/fixed/${f.id}${removeAll ? "?remove_entries=true" : ""}`, { method: "DELETE" });
+    if (state.editingFixed?.id === f.id) resetFixedForm();
+    toast("Gasto fixo removido");
+    await Promise.all([loadFixed(), loadTxs()]);
   }
 
   /* ------------------------------------------------------------ bank sync (Open Finance) */
@@ -1446,6 +1575,8 @@
     $("#bank-edit-btn").addEventListener("click", () => toggleBankForm($("#bank-form").hidden));
     $("#bank-form").addEventListener("submit", saveBank);
     $("#bank-sync-btn").addEventListener("click", syncBank);
+    $("#fixed-form").addEventListener("submit", saveFixed);
+    $("#fixed-cancel").addEventListener("click", resetFixedForm);
 
     let resizeTimer;
     let lastWidth = window.innerWidth;
@@ -1457,7 +1588,7 @@
     });
     window.addEventListener("hashchange", () => {
       const v = location.hash.slice(1);
-      if (["dashboard", "transactions", "import"].includes(v) && v !== state.view) setView(v);
+      if (VIEWS.includes(v) && v !== state.view) setView(v);
     });
     window.addEventListener("scroll", () => window.Charts.tooltip.hide(), { passive: true });
 
@@ -1480,7 +1611,7 @@
     await Promise.all([loadMeta(), loadTxs(), loadImports()]);
     if (state.imports.some((i) => i.status === "processing")) startPolling();
     const v = location.hash.slice(1);
-    setView(["dashboard", "transactions", "import"].includes(v) ? v : "dashboard");
+    setView(VIEWS.includes(v) ? v : "dashboard");
   }
 
   boot().catch((e) => {

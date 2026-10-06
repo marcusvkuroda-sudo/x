@@ -118,17 +118,30 @@ gratuito para as suas próprias contas (até 5 conexões, todas do mesmo titular
    ajuste categorias e importe.
 
 - A primeira sincronização traz os últimos 90 dias; as próximas só o que for novo (nada entra duas vezes).
-- Ficam de fora: pagamento de fatura, transferências entre suas contas, aplicações/resgates e dinheiro
-  recebido. Quando um valor sai de um banco e entra no outro (um Pix entre vocês dois, a fatura do
-  Santander paga pelo Inter), ele chega **desmarcado** na revisão, com o motivo ao lado: marque se for
-  gasto de verdade. Compras no cartão contam no mês da fatura em que caíram, inclusive as da fatura
-  que ainda está aberta.
+- Entram só **compras no cartão de crédito** (o que vai para a fatura) e **compras no cartão de débito**
+  (estacionamento, um café). Pix enviados ou recebidos, boletos, transferências, TED, salário e
+  aplicações ficam de fora: aluguel e contas vão em **Gastos fixos** (abaixo).
+- Compras no cartão contam no mês da fatura em que caem, inclusive as da fatura ainda aberta.
+- A categoria vem, nesta ordem: das correções que vocês já fizeram, do tipo do estabelecimento
+  informado pela bandeira do cartão (MCC), da categoria da Pluggy e, por último, das palavras da
+  descrição. Corrigiu uma? O app lembra nas próximas.
 - Se um banco aparecer como "reconecte no meu.pluggy.ai", renove a autorização lá (o Open Finance pede
   isso de tempos em tempos).
 - As chaves ficam só no computador, em `data/pluggy.json` (o app nunca mostra o Client Secret de volta).
   Quem preferir pode usar `PLUGGY_CLIENT_ID`, `PLUGGY_CLIENT_SECRET` e `PLUGGY_ITEM_IDS` no `.env`.
 - Se você já importou o PDF de uma fatura, a sincronização marca os lançamentos iguais como
   "possível duplicado" e os deixa desmarcados.
+
+## Gastos fixos
+
+Na aba **🔁 Fixos**, cadastre uma vez o que se repete todo mês (aluguel, condomínio, internet, escola,
+plano de saúde): valor, categoria, dia e a partir de que mês. O app lança o gasto sozinho em cada mês,
+desde o mês inicial até o mês atual, e no começo de cada mês novo.
+
+- Mudou o valor (reajuste do aluguel)? Edite: vale deste mês em diante, ou marque para corrigir
+  também os meses anteriores.
+- Uma conta veio diferente num mês (luz mais cara)? Edite só aquele lançamento em **Lançamentos**.
+- Acabou? Preencha "Até" ou exclua; os meses já lançados ficam, a menos que você peça para apagar.
 
 ## Privacidade e backup
 

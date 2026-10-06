@@ -243,7 +243,7 @@ main {
     border-top: 1px solid var(--border);
     padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   }
-  .tab { flex-direction: column; gap: 2px; font-size: 12px; padding: 6px 12px; border-radius: 12px; }
+  .tab { flex-direction: column; gap: 2px; font-size: 12px; padding: 6px 8px; border-radius: 12px; }
   .tab .tab-icon { font-size: 20px; }
   .tab[aria-current="page"] { background: var(--surface-2); color: var(--ink); }
   body { padding-bottom: 140px; }
@@ -780,3 +780,12 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(2px); 
 
 .bank-list { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .bank-list li { font-size: 14px; }
+
+.check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--ink-2); cursor: pointer; }
+.check input { margin-top: 2px; }
+.fixed-row { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+.fixed-actions { display: flex; gap: 4px; align-items: center; }
+@media (max-width: 600px) {
+  .fixed-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .fixed-row .fixed-actions { grid-column: 2 / -1; justify-content: flex-end; }
+}
