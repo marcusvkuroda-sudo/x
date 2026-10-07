@@ -374,7 +374,13 @@
     }
 
     // Monthly series: 12 months ending at the period's last month (or the whole period if longer, max 24).
-    const endMonth = startOfMonth(period.end > t0 && state.preset === "all" ? t0 : period.end);
+    let endMonth = startOfMonth(period.end > t0 && state.preset === "all" ? t0 : period.end);
+    // By statement month, the open bill may already count in a coming month: show it too.
+    if (period.end >= t0) {
+      const limit = monthKey(addMonths(startOfMonth(t0), 2));
+      const ahead = scoped.map(monthOf).filter((m) => m > monthKey(endMonth) && m <= limit).sort().pop();
+      if (ahead) endMonth = parseDate(`${ahead}-01`);
+    }
     const nMonths = Math.min(24, Math.max(12, monthsSpanned(period.start, period.end)));
     const monthKeys = [];
     for (let i = nMonths - 1; i >= 0; i--) monthKeys.push(monthKey(addMonths(endMonth, -i)));

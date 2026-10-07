@@ -21,17 +21,18 @@ CARD_TXS = [
      "status": "PENDING"},
     {"id": "c6", "date": "2026-09-07T10:00:00.000Z", "description": "ESTAB 4421 SP", "amount": 80.0, "type": "DEBIT",
      "status": "POSTED", "category": "Supermarket"},
-    # Bill still open (no billId): before and after its closing date (2026-09-28).
+    # Bill still open (no billId). The card closes on the 9th and is due on the 17th.
     {"id": "c7", "date": "2026-09-20T10:00:00.000Z", "description": "DROGASIL", "amount": 30.0, "type": "DEBIT",
      "status": "POSTED"},
-    {"id": "c8", "date": "2026-09-29T10:00:00.000Z", "description": "NETFLIX", "amount": 55.9, "type": "DEBIT",
+    {"id": "c8", "date": "2026-10-10T10:00:00.000Z", "description": "NETFLIX", "amount": 55.9, "type": "DEBIT",
      "status": "POSTED"},
     # The merchant's MCC says what it is, even when the name and Pluggy don't.
     {"id": "c9", "date": "2026-09-08T10:00:00.000Z", "description": "ESTAB XPTO 77", "amount": 64.0, "type": "DEBIT",
      "status": "POSTED", "category": "Shopping", "creditCardMetadata": {"payeeMCC": 5812}},
-    # Bill forecast given by the bank wins over our guess.
-    {"id": "c10", "date": "2026-09-21T10:00:00.000Z", "description": "PADARIA REAL", "amount": 18.0, "type": "DEBIT",
-     "status": "POSTED", "creditCardMetadata": {"billForecastDate": "2026-12"}},
+    # An installment dated on the original purchase: the bank's forecast wins over the cycle.
+    {"id": "c10", "date": "2026-06-15T10:00:00.000Z", "description": "PADARIA REAL", "amount": 18.0, "type": "DEBIT",
+     "status": "POSTED", "creditCardMetadata": {"billForecastDate": "2026-10", "installmentNumber": 4,
+                                                "totalInstallments": 6}},
 ]
 ACCOUNT_TXS = [
     {"id": "a1", "date": "2026-09-01", "description": "Pix enviado - Padaria", "amount": -15.5, "type": "DEBIT",
@@ -76,11 +77,16 @@ def fake_pluggy(calls: list):
             if q["itemId"] == "inter":
                 return httpx.Response(200, json={"results": [{"id": "acc", "type": "BANK"}], "totalPages": 1})
             card = {"id": "card", "type": "CREDIT", "name": "SANTANDER SX VISA",
+                    # Stale "current balance" dates: the bills' own dates must win.
                     "creditData": {"balanceCloseDate": "2026-09-28T00:00:00.000Z", "balanceDueDate": "2026-11-08"}}
             return httpx.Response(200, json={"results": [card, {"id": "sacc", "type": "BANK"}], "totalPages": 1})
         if path == "/bills":
             # Not paged, on purpose.
-            return httpx.Response(200, json=[{"id": "b9", "dueDate": "2026-09-20"}, {"id": "b10", "dueDate": "2026-10-20"}])
+            # The open bill (b10) is listed too, before it closes.
+            return httpx.Response(200, json=[
+                {"id": "b9", "dueDate": "2026-09-17", "billClosingDate": "2026-09-09"},
+                {"id": "b10", "dueDate": "2026-10-17T00:00:00.000Z", "billClosingDate": "2026-10-09"},
+            ])
         if path == "/transactions":
             return httpx.Response(410, json={"message": "This endpoint is deprecated. Use GET /v2/transactions"})
         if path == "/v2/transactions":
@@ -124,11 +130,12 @@ def test_fetch_keeps_card_purchases_only(calls):
     assert by_id["pluggy:c3"]["amount_cents"] == -3990 and by_id["pluggy:c2"]["date"] == "2026-09-03"
     assert result["issuer"] == "Banco Inter + Santander"
     assert any("Santander" in w and "renovada" in w for w in result["warnings"])
-    # Open bill: statement month from the bank's forecast, else from the closing and due dates.
-    assert by_id["pluggy:c10"]["bill_month"] == "2026-12"
-    assert by_id["pluggy:c7"]["bill_month"] == "2026-11" and by_id["pluggy:c8"]["bill_month"] == "2026-12"
-    # Imported before its bill closed: its statement month is now known.
-    assert result["bill_updates"] == {"pluggy:c1": "2026-09"}
+    # Open bill: statement month from the card's cycle (closes on the 9th, due on the 17th).
+    assert by_id["pluggy:c7"]["bill_month"] == "2026-10"  # bought 20/09 -> due 17/10
+    assert by_id["pluggy:c8"]["bill_month"] == "2026-11"  # bought 10/10, after the closing -> due 17/11
+    assert by_id["pluggy:c10"]["bill_month"] == "2026-10"
+    # Already imported: their statement month is (re)computed, which fixes it once the bill closes.
+    assert result["bill_updates"] == {"pluggy:c1": "2026-09", "pluggy:c6": "2026-09"}
 
 
 def test_categories_prefer_mcc_then_pluggy(calls):
@@ -226,3 +233,12 @@ def test_known_entry_gets_its_statement_month(client, calls):
     wait(client, client.post("/api/bank/sync").json()["id"])
     tx = next(t for t in client.get("/api/transactions").json() if t["external_id"] == "pluggy:c1")
     assert tx["bill_month"] == "2026-09"
+
+
+def test_statement_month_from_cycle():
+    month = pluggy.statement_month
+    assert [month(d, 9, 17) for d in ("2026-09-09", "2026-09-10", "2026-10-09", "2026-12-20")] == [
+        "2026-09", "2026-10", "2026-10", "2027-01"]
+    # Cards that close at the end of the month and are due early the next one.
+    assert [month(d, 26, 5) for d in ("2026-10-20", "2026-10-28")] == ["2026-11", "2026-12"]
+    assert month("2026-02-27", 30, 7) == "2026-03"  # closing day past the month's end

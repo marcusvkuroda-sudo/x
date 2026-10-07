@@ -6,6 +6,7 @@ Those stay on this computer (data/pluggy.json). A sync turns the accounts' trans
 an import that goes through the usual review screen.
 """
 
+import calendar
 import json
 import os
 import re
@@ -22,7 +23,9 @@ from .extractor import ExtractionError
 API = os.environ.get("PLUGGY_API_URL", "https://api.pluggy.ai")
 FIRST_SYNC_DAYS = 90
 TRANSPORT: httpx.BaseTransport | None = None  # tests swap in a fake Pluggy
-OVERLAP_DAYS = 10  # re-read a few days: banks post some transactions late
+# Re-read the last weeks on every sync: banks post some transactions late, and purchases of the
+# open bill get their final statement month once it closes.
+OVERLAP_DAYS = 40
 
 # Card purchases carry the merchant's MCC (the card networks' merchant category): the most
 # reliable hint there is. Ranges are inclusive.
@@ -308,25 +311,51 @@ def _next_month(month: str) -> str:
     return f"{y + m // 12}-{m % 12 + 1:02d}"
 
 
+def _day(text) -> int | None:
+    m = re.match(r"\d{4}-\d{2}-(\d{2})", str(text or ""))
+    return int(m.group(1)) if m else None
+
+
+def _on_day(year: int, month: int, day: int) -> date:
+    while month > 12:
+        year, month = year + 1, month - 12
+    return date(year, month, min(day, calendar.monthrange(year, month)[1]))
+
+
+def statement_month(tx_date: str, closing_day: int, due_day: int) -> str | None:
+    """Month of the bill a purchase goes to, from the card's closing and due days: the first
+    closing on or after the purchase, then the first due date after that closing."""
+    try:
+        d = date.fromisoformat(tx_date[:10])
+    except ValueError:
+        return None
+    closing = _on_day(d.year, d.month, closing_day)
+    if d > closing:
+        closing = _on_day(d.year, d.month + 1, closing_day)
+    due = _on_day(closing.year, closing.month, due_day)
+    if due <= closing:
+        due = _on_day(closing.year, closing.month + 1, due_day)
+    return f"{due.year}-{due.month:02d}"
+
+
 def _bill_schedule(client: Client, account: dict):
-    """For a credit card: bill id -> statement month (month of its due date), and a guess for
-    purchases of the bill still open, which has no id yet."""
+    """For a credit card: bill id -> statement month (month of its due date), and the statement
+    month of purchases still in the open bill (no bill id yet), from the card's cycle."""
     try:
         bills = client.paged("/bills", accountId=account["id"])
     except SyncError:
         bills = []
     by_id = {b["id"]: _month(b.get("dueDate")) for b in bills if b.get("id") and _month(b.get("dueDate"))}
+    # The cycle (closing and due days) of the most recent bill, else of the card's current balance.
+    latest = max(bills, key=lambda b: str(b.get("dueDate") or ""), default={})
     credit = account.get("creditData") or {}
-    open_due = _month(credit.get("balanceDueDate"))
-    close = str(credit.get("balanceCloseDate") or "")[:10]
-    if not open_due and by_id:
-        open_due = _next_month(max(by_id.values()))
+    due_day = _day(latest.get("dueDate")) or _day(credit.get("balanceDueDate"))
+    closing_day = _day(latest.get("billClosingDate")) or _day(credit.get("balanceCloseDate"))
+    if due_day and not closing_day:
+        closing_day = (due_day - 8 - 1) % 28 + 1  # most cards close about a week before the due date
 
     def open_bill(tx_date: str) -> str | None:
-        if not open_due:
-            return None
-        # Bought after the open bill closed: goes to the one after it.
-        return _next_month(open_due) if close and tx_date > close else open_due
+        return statement_month(tx_date, closing_day, due_day) if due_day else None
 
     return by_id, open_bill
 
@@ -360,10 +389,17 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
                 meta = t.get("creditCardMetadata") or {}
                 bill_month = None
                 if card:
-                    bill_month = bill_by_id.get(meta.get("billId") or "") or _month(meta.get("billForecastDate"))
+                    # Installments may carry the original purchase date: for them the bank's own
+                    # forecast is safer than the card's cycle.
+                    later_installment = int(meta.get("installmentNumber") or 1) >= 2
+                    forecast = _month(meta.get("billForecastDate"))
+                    cycle = open_bill(str(meta.get("billPostDate") or tx_date))
+                    bill_month = bill_by_id.get(meta.get("billId") or "") or (
+                        (forecast or cycle) if later_installment else (cycle or forecast)
+                    )
                 if ext_id in known_ids:
                     if bill_month:
-                        bill_updates[ext_id] = bill_month
+                        bill_updates[ext_id] = bill_month  # fixes the month once the bill closes
                     continue
                 description = re.sub(r"\s+", " ", t.get("description") or t.get("descriptionRaw") or "").strip()
                 cents = int(round(abs(float(t.get("amount") or 0)) * 100))
@@ -398,7 +434,7 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
                         "notes": " · ".join(notes),
                         "source": source,
                         "external_id": ext_id,
-                        "bill_month": bill_month or (open_bill(tx_date) if card else None),
+                        "bill_month": bill_month,
                     }
                 )
     if left_out:
