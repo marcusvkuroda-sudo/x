@@ -17,7 +17,8 @@ CARD_TXS = [
      "status": "POSTED"},
     {"id": "c4", "date": "2026-09-05T10:00:00.000Z", "description": "PAGAMENTO DE FATURA", "amount": 1500.0,
      "type": "CREDIT", "status": "POSTED"},
-    {"id": "c5", "date": "2026-09-06T10:00:00.000Z", "description": "UBER *TRIP", "amount": 23.0, "type": "DEBIT",
+    # Open bill purchases come PENDING, without a bill.
+    {"id": "c5", "date": "2026-10-06T10:00:00.000Z", "description": "UBER *TRIP", "amount": 23.0, "type": "DEBIT",
      "status": "PENDING"},
     {"id": "c6", "date": "2026-09-07T10:00:00.000Z", "description": "ESTAB 4421 SP", "amount": 80.0, "type": "DEBIT",
      "status": "POSTED", "category": "Supermarket"},
@@ -50,6 +51,9 @@ ACCOUNT_TXS = [
     {"id": "a7", "date": "2026-09-12", "description": "COMPRA CARTAO DEBITO - ESTAPAR", "amount": -25.0,
      "type": "DEBIT", "operationType": "CARTAO"},
     {"id": "a8", "date": "2026-09-13", "description": "COMPRA NO DEBITO PADARIA BELA", "amount": -12.0, "type": "DEBIT"},
+    # In the account, PENDING is just an authorization: left out.
+    {"id": "a10", "date": "2026-09-14", "description": "COMPRA NO DEBITO POSTO", "amount": -90.0, "type": "DEBIT",
+     "status": "PENDING"},
 ]
 SANTANDER_ACCOUNT_TXS = [
     {"id": "s1", "date": "2026-09-12", "description": "Pix recebido", "amount": 500.0, "type": "CREDIT"},
@@ -120,8 +124,11 @@ def test_fetch_keeps_card_purchases_only(calls):
         result = pluggy.fetch(client, ["inter", "santander"], date(2026, 8, 1), known_ids={"pluggy:c6", "pluggy:c1"})
     by_id = {t["external_id"]: t for t in result["transactions"]}
     # From the accounts only the debit card purchases: no Pix, boleto, rent, bills or income.
-    assert set(by_id) == {"pluggy:a7", "pluggy:a8", "pluggy:c2", "pluggy:c3", "pluggy:c7", "pluggy:c8",
+    assert set(by_id) == {"pluggy:a7", "pluggy:a8", "pluggy:c2", "pluggy:c3", "pluggy:c5", "pluggy:c7", "pluggy:c8",
                           "pluggy:c9", "pluggy:c10"}
+    assert by_id["pluggy:c5"]["bill_month"] == "2026-10"  # pending, bought 06/10 -> due 17/10
+    # Open bill total per card, to compare with the bank's app (c5 23,00 + c7 30,00 + c10 18,00).
+    assert any("vence em 10/2026 soma R$ 71,00" in w for w in result["warnings"])
     assert any("4 movimenta" in w and "Gastos fixos" in w for w in result["warnings"])
     assert by_id["pluggy:a7"]["amount_cents"] == 2500 and by_id["pluggy:a7"]["source"] == "Banco Inter débito"
     assert by_id["pluggy:a7"]["merchant"] == "Estapar" and by_id["pluggy:a7"]["category"] == "transporte"
@@ -177,7 +184,7 @@ def test_sync_end_to_end(client, calls):
     assert imp["status"] == "review", imp
     assert imp["document_type"] == "open_finance"
     rows = imp["transactions"]
-    assert len(rows) == 10
+    assert len(rows) == 11
 
     # A second sync while the first waits for review brings nothing twice.
     second = wait(client, client.post("/api/bank/sync").json()["id"])
@@ -188,7 +195,7 @@ def test_sync_end_to_end(client, calls):
                                       "notes", "source", "external_id", "bill_month")}, "remember": False}
                for t in rows if t["external_id"] != "pluggy:c8"]
     r = client.post(f"/api/imports/{import_id}/confirm", json={"source": "", "transactions": payload})
-    assert r.json()["imported"] == 9
+    assert r.json()["imported"] == 10
     txs = {t["external_id"]: t for t in client.get("/api/transactions").json()}
     assert txs["pluggy:c2"]["bill_month"] == "2026-10"
     assert txs["pluggy:a7"]["bill_month"] == "2026-09"  # debit: month of the date

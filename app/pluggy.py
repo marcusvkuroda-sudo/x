@@ -370,6 +370,7 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
     transactions, warnings, banks = [], [], []
     bill_updates = {}
     left_out = 0
+    open_bills = {}  # (card, statement month) -> amounts of the purchases not billed yet
     for item in describe_items(client, item_ids):
         banks.append(item["bank"])
         if item["status"] in ("LOGIN_ERROR", "OUTDATED", "WAITING_USER_INPUT", "ERROR"):
@@ -382,7 +383,10 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
             bill_by_id, open_bill = _bill_schedule(client, account) if card else ({}, lambda _d: None)
             source = f"{item['bank']} {'cartão' if card else 'débito'}"
             for t in client.cursor("/v2/transactions", accountId=account["id"], dateFrom=since.isoformat()):
-                if not t.get("id") or (t.get("status") or "POSTED") == "PENDING":
+                # The open bill's purchases come as PENDING (no bill yet) and turn POSTED, keeping
+                # their id, when it closes. In the account, PENDING is only an authorization.
+                pending = (t.get("status") or "POSTED") == "PENDING"
+                if not t.get("id") or (pending and not card):
                     continue
                 ext_id = f"pluggy:{t['id']}"
                 tx_date = str(t.get("date", ""))[:10]
@@ -397,6 +401,10 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
                     bill_month = bill_by_id.get(meta.get("billId") or "") or (
                         (forecast or cycle) if later_installment else (cycle or forecast)
                     )
+                if card and not meta.get("billId") and bill_month:
+                    amount = float(t.get("amount") or 0) * (1 if (t.get("type") or "").upper() == "DEBIT" else -1)
+                    if not NOT_SPENDING.search(t.get("description") or ""):
+                        open_bills.setdefault((source, bill_month), []).append(amount)
                 if ext_id in known_ids:
                     if bill_month:
                         bill_updates[ext_id] = bill_month  # fixes the month once the bill closes
@@ -437,6 +445,13 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
                         "bill_month": bill_month,
                     }
                 )
+    for (source, month), amounts in sorted(open_bills.items()):
+        y, m = month.split("-")
+        total = f"{sum(amounts):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        warnings.append(
+            f"{source}: fatura aberta que vence em {m}/{y} soma R$ {total} até agora "
+            f"({len(amounts)} lançamento(s)). Compare com o app do banco."
+        )
     if left_out:
         warnings.append(
             f"{left_out} movimentação(ões) da conta (Pix, boletos, transferências) ficaram de fora: "
