@@ -642,6 +642,14 @@ def _run_bank_sync(import_id: int) -> None:
     if not result["transactions"]:
         result["warnings"].append("Nenhum gasto novo desde a última sincronização.")
     with db.session() as conn:
+        # Bill payments, Pix and the like imported by older versions: not spending, out they go.
+        removed = 0
+        for ext_id in result["remove_ids"]:
+            removed += conn.execute("DELETE FROM transactions WHERE external_id = ?", (ext_id,)).rowcount
+        if removed:
+            result["warnings"].append(
+                f"Removi {removed} lançamento(s) importados antes que não são gastos (pagamentos de fatura, Pix, boletos)."
+            )
         # Entries imported while their card bill was still open: now their statement month is known.
         for ext_id, month in result["bill_updates"].items():
             conn.execute(

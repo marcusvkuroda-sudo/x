@@ -87,6 +87,21 @@ _NOT_A_PURCHASE = re.compile(r"\bpix\b|boleto|\bted\b|\bdoc\b|transf|pagamento|p
 _TRANSFER_METHODS = {"PIX", "TED", "DOC", "TEF", "BOLETO"}
 
 
+# Paying the card bill, seen from either side: "PAGAMENTO RECEBIDO" / "PAGTO DEB AUTOMATICO" on the
+# card, "PAGAMENTO FATURA CARTAO" / "DEB AUT FATURA" in the account.
+_BILL_PAYMENT = re.compile(
+    r"pagamento|pagto|pgto|\bpag\b|\bpgt\b|deb\.?\s*aut|d[eé]bito\s+autom|\bfatura\b|cr[eé]dito\s+de\s+pagamento",
+    re.IGNORECASE,
+)
+
+
+def _bill_payment(t: dict, description: str, card: bool, outgoing: bool) -> bool:
+    if NOT_SPENDING.search(description) or "credit card payment" in (t.get("category") or "").lower():
+        return True
+    # A card's own purchases may carry those words ("MP *PAGAMENTO..."): only its credits are checked.
+    return (not card or not outgoing) and bool(_BILL_PAYMENT.search(description))
+
+
 def _debit_card_purchase(t: dict, description: str) -> bool:
     op = (t.get("operationType") or "").upper()
     if op == "CARTAO":
@@ -370,7 +385,8 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
     transactions, warnings, banks = [], [], []
     bill_updates = {}
     left_out = 0
-    open_bills = {}  # (card, statement month) -> amounts of the purchases not billed yet
+    open_bills = {}  # (card, statement month) -> cents of the purchases not billed yet
+    remove_ids = set()
     for item in describe_items(client, item_ids):
         banks.append(item["bank"])
         if item["status"] in ("LOGIN_ERROR", "OUTDATED", "WAITING_USER_INPUT", "ERROR"):
@@ -401,26 +417,28 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
                     bill_month = bill_by_id.get(meta.get("billId") or "") or (
                         (forecast or cycle) if later_installment else (cycle or forecast)
                     )
-                if card and not meta.get("billId") and bill_month:
-                    amount = float(t.get("amount") or 0) * (1 if (t.get("type") or "").upper() == "DEBIT" else -1)
-                    if not NOT_SPENDING.search(t.get("description") or ""):
-                        open_bills.setdefault((source, bill_month), []).append(amount)
-                if ext_id in known_ids:
-                    if bill_month:
-                        bill_updates[ext_id] = bill_month  # fixes the month once the bill closes
-                    continue
                 description = re.sub(r"\s+", " ", t.get("description") or t.get("descriptionRaw") or "").strip()
                 cents = int(round(abs(float(t.get("amount") or 0)) * 100))
-                if not description or not cents or NOT_SPENDING.search(description):
-                    continue
                 outgoing = (t.get("type") or "").upper() == "DEBIT"
-                if not card:
-                    if not outgoing:
-                        continue  # money coming in: not spending
-                    if not _debit_card_purchase(t, description):
-                        left_out += 1
-                        continue
-                elif not outgoing:
+                payment = _bill_payment(t, description, card, outgoing)
+                # Card: purchases and refunds. Account: only debit card purchases (money coming in,
+                # Pix, boletos and transfers are not spending).
+                spending = bool(description and cents and not payment) and (
+                    card or (outgoing and _debit_card_purchase(t, description))
+                )
+                if not card and outgoing and description and cents and not spending and not NOT_SPENDING.search(description):
+                    left_out += 1  # Pix, boletos, transfers: told apart from bill payments and investments
+                if spending and card and pending and bill_month:
+                    open_bills.setdefault((source, bill_month), []).append(cents if outgoing else -cents)
+                if ext_id in known_ids:
+                    if not spending:
+                        remove_ids.add(ext_id)  # imported by an older version (a bill payment, a Pix)
+                    elif bill_month:
+                        bill_updates[ext_id] = bill_month  # fixes the month once the bill closes
+                    continue
+                if not spending:
+                    continue
+                if card and not outgoing:
                     cents = -cents  # refund / credit on the card
                 installment = None
                 k, n = meta.get("installmentNumber"), meta.get("totalInstallments")
@@ -447,7 +465,7 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
                 )
     for (source, month), amounts in sorted(open_bills.items()):
         y, m = month.split("-")
-        total = f"{sum(amounts):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        total = f"{sum(amounts) / 100:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         warnings.append(
             f"{source}: fatura aberta que vence em {m}/{y} soma R$ {total} até agora "
             f"({len(amounts)} lançamento(s)). Compare com o app do banco."
@@ -466,6 +484,7 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
         "transactions": sorted(transactions, key=lambda t: t["date"]),
         "warnings": warnings,
         "bill_updates": bill_updates,
+        "remove_ids": sorted(remove_ids),
         "model": "open-finance",
         "input_tokens": None,
         "output_tokens": None,

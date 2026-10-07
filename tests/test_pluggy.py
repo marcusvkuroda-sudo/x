@@ -51,9 +51,23 @@ ACCOUNT_TXS = [
     {"id": "a7", "date": "2026-09-12", "description": "COMPRA CARTAO DEBITO - ESTAPAR", "amount": -25.0,
      "type": "DEBIT", "operationType": "CARTAO"},
     {"id": "a8", "date": "2026-09-13", "description": "COMPRA NO DEBITO PADARIA BELA", "amount": -12.0, "type": "DEBIT"},
+    # Bill payment the bank labels as a card operation: still not spending.
+    {"id": "a11", "date": "2026-09-16", "description": "PAGAMENTO FATURA CARTAO SANTANDER", "amount": -3000.0,
+     "type": "DEBIT", "operationType": "CARTAO"},
     # In the account, PENDING is just an authorization: left out.
     {"id": "a10", "date": "2026-09-14", "description": "COMPRA NO DEBITO POSTO", "amount": -90.0, "type": "DEBIT",
      "status": "PENDING"},
+]
+INTER_CARD_TXS = [
+    {"id": "i1", "date": "2026-10-01T10:00:00.000Z", "description": "IFOOD *RESTAURANTE", "amount": 80.0, "type": "DEBIT",
+     "status": "PENDING"},
+    {"id": "i2", "date": "2026-10-03T10:00:00.000Z", "description": "SHELL", "amount": 150.0, "type": "DEBIT",
+     "status": "PENDING"},
+    # Bill payments on the card side: never spending.
+    {"id": "i3", "date": "2026-09-10T10:00:00.000Z", "description": "PAGTO DEB AUTOMATICO", "amount": 900.0,
+     "type": "CREDIT", "status": "POSTED"},
+    {"id": "i4", "date": "2026-09-11T10:00:00.000Z", "description": "Pagamento efetuado", "amount": 50.0,
+     "type": "CREDIT", "status": "POSTED", "category": "Credit card payment"},
 ]
 SANTANDER_ACCOUNT_TXS = [
     {"id": "s1", "date": "2026-09-12", "description": "Pix recebido", "amount": 500.0, "type": "CREDIT"},
@@ -75,15 +89,23 @@ def fake_pluggy(calls: list):
         if path == "/items/santander":
             # Connected through Meu Pluggy: the connector doesn't name the bank, the accounts do.
             return httpx.Response(200, json={"id": "santander", "status": "OUTDATED", "connector": {"name": "MeuPluggy"}})
+        if path == "/items/inter2":
+            return httpx.Response(200, json={"id": "inter2", "status": "UPDATED", "connector": {"name": "Banco Inter"}})
         if path.startswith("/items/"):
             return httpx.Response(404, json={"message": "not found"})
         if path == "/accounts":
             if q["itemId"] == "inter":
                 return httpx.Response(200, json={"results": [{"id": "acc", "type": "BANK"}], "totalPages": 1})
+            if q["itemId"] == "inter2":
+                icard = {"id": "icard", "type": "CREDIT", "creditData": {"balanceCloseDate": "2026-10-02",
+                                                                         "balanceDueDate": "2026-10-10"}}
+                return httpx.Response(200, json={"results": [icard], "totalPages": 1})
             card = {"id": "card", "type": "CREDIT", "name": "SANTANDER SX VISA",
                     # Stale "current balance" dates: the bills' own dates must win.
                     "creditData": {"balanceCloseDate": "2026-09-28T00:00:00.000Z", "balanceDueDate": "2026-11-08"}}
             return httpx.Response(200, json={"results": [card, {"id": "sacc", "type": "BANK"}], "totalPages": 1})
+        if path == "/bills" and q["accountId"] == "icard":
+            return httpx.Response(200, json={"results": [], "totalPages": 1})
         if path == "/bills":
             # Not paged, on purpose.
             # The open bill (b10) is listed too, before it closes.
@@ -95,7 +117,7 @@ def fake_pluggy(calls: list):
             return httpx.Response(410, json={"message": "This endpoint is deprecated. Use GET /v2/transactions"})
         if path == "/v2/transactions":
             assert "dateFrom" in q and "page" not in q
-            txs = {"card": CARD_TXS, "acc": ACCOUNT_TXS, "sacc": SANTANDER_ACCOUNT_TXS}[q["accountId"]]
+            txs = {"card": CARD_TXS, "acc": ACCOUNT_TXS, "sacc": SANTANDER_ACCOUNT_TXS, "icard": INTER_CARD_TXS}[q["accountId"]]
             # two pages, to exercise the cursor (a base64 cursor with "+" and "=")
             half = len(txs) // 2
             if q.get("after") == "c2Vn+dW5kYQ==":
@@ -127,8 +149,8 @@ def test_fetch_keeps_card_purchases_only(calls):
     assert set(by_id) == {"pluggy:a7", "pluggy:a8", "pluggy:c2", "pluggy:c3", "pluggy:c5", "pluggy:c7", "pluggy:c8",
                           "pluggy:c9", "pluggy:c10"}
     assert by_id["pluggy:c5"]["bill_month"] == "2026-10"  # pending, bought 06/10 -> due 17/10
-    # Open bill total per card, to compare with the bank's app (c5 23,00 + c7 30,00 + c10 18,00).
-    assert any("vence em 10/2026 soma R$ 71,00" in w for w in result["warnings"])
+    # Open bill (pending purchases) total per card, to compare with the bank's app.
+    assert any("vence em 10/2026 soma R$ 23,00" in w for w in result["warnings"])
     assert any("4 movimenta" in w and "Gastos fixos" in w for w in result["warnings"])
     assert by_id["pluggy:a7"]["amount_cents"] == 2500 and by_id["pluggy:a7"]["source"] == "Banco Inter débito"
     assert by_id["pluggy:a7"]["merchant"] == "Estapar" and by_id["pluggy:a7"]["category"] == "transporte"
@@ -249,3 +271,31 @@ def test_statement_month_from_cycle():
     # Cards that close at the end of the month and are due early the next one.
     assert [month(d, 26, 5) for d in ("2026-10-20", "2026-10-28")] == ["2026-11", "2026-12"]
     assert month("2026-02-27", 30, 7) == "2026-03"  # closing day past the month's end
+
+
+def test_bill_payments_left_out_and_cleaned_up(calls):
+    from datetime import date
+
+    known = {"pluggy:i3", "pluggy:a1", "pluggy:a11", "pluggy:a7"}  # imported by older versions
+    with pluggy.Client("id", "segredo") as client:
+        result = pluggy.fetch(client, ["inter", "inter2", "santander"], date(2026, 8, 1), known)
+    ids = {t["external_id"] for t in result["transactions"]}
+    assert not ids & {"pluggy:i3", "pluggy:i4", "pluggy:a11"}
+    # Already imported bill payment and Pix go away; a real purchase stays.
+    assert result["remove_ids"] == ["pluggy:a1", "pluggy:a11", "pluggy:i3"]
+    # Open bill per card, each one to compare with its bank's app.
+    open_bills = [w.split(" até")[0] for w in result["warnings"] if "fatura aberta" in w]
+    assert open_bills == [
+        "Banco Inter cartão: fatura aberta que vence em 10/2026 soma R$ 80,00",
+        "Banco Inter cartão: fatura aberta que vence em 11/2026 soma R$ 150,00",  # bought after it closed (02/10)
+        "Santander cartão: fatura aberta que vence em 10/2026 soma R$ 23,00",
+    ]
+
+
+def test_sync_removes_bill_payment_imported_before(client, calls):
+    client.post("/api/bank/config", json={"client_id": "id", "client_secret": "segredo", "item_ids": "inter2"})
+    client.post("/api/transactions", json={"date": "2026-09-10", "description": "PAGTO DEB AUTOMATICO",
+                                            "amount_cents": -90000, "category": "outros", "external_id": "pluggy:i3"})
+    imp = wait(client, client.post("/api/bank/sync").json()["id"])
+    assert any("Removi 1 lançamento" in w for w in imp["warnings"])
+    assert all(t["external_id"] != "pluggy:i3" for t in client.get("/api/transactions").json())
