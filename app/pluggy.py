@@ -372,7 +372,48 @@ def _bill_schedule(client: Client, account: dict):
     def open_bill(tx_date: str) -> str | None:
         return statement_month(tx_date, closing_day, due_day) if due_day else None
 
+    open_bill.cycle = (closing_day, due_day)  # shown by check()
+    open_bill.bills = bills
     return by_id, open_bill
+
+
+def check(client: Client, item_ids: list[str]) -> list[dict]:
+    """What the banks say about each card: total of each closed bill, the card's cycle and its
+    current balance, to compare with what was imported."""
+    cards = []
+    for item in describe_items(client, item_ids):
+        for account in client.paged("/accounts", itemId=item["id"]):
+            if account.get("type") != "CREDIT":
+                continue
+            _by_id, open_bill = _bill_schedule(client, account)
+            credit = account.get("creditData") or {}
+            bills = sorted(
+                (
+                    {
+                        "month": _month(b.get("dueDate")),
+                        "due_date": str(b.get("dueDate") or "")[:10],
+                        "closing_date": str(b.get("billClosingDate") or "")[:10] or None,
+                        "total_cents": int(round(float(b.get("totalAmount") or 0) * 100)),
+                    }
+                    for b in open_bill.bills
+                    if _month(b.get("dueDate"))
+                ),
+                key=lambda b: b["month"],
+            )
+            balance = account.get("balance")
+            cards.append(
+                {
+                    "source": f"{item['bank']} cartão",
+                    "closing_day": open_bill.cycle[0],
+                    "due_day": open_bill.cycle[1],
+                    "open_month": open_bill(date.today().isoformat()),
+                    "balance_cents": int(round(float(balance) * 100)) if balance is not None else None,
+                    "balance_close_date": str(credit.get("balanceCloseDate") or "")[:10] or None,
+                    "balance_due_date": str(credit.get("balanceDueDate") or "")[:10] or None,
+                    "bills": bills[-4:],
+                }
+            )
+    return cards
 
 
 def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str]) -> dict:

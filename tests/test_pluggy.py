@@ -110,7 +110,7 @@ def fake_pluggy(calls: list):
             # Not paged, on purpose.
             # The open bill (b10) is listed too, before it closes.
             return httpx.Response(200, json=[
-                {"id": "b9", "dueDate": "2026-09-17", "billClosingDate": "2026-09-09"},
+                {"id": "b9", "dueDate": "2026-09-17", "billClosingDate": "2026-09-09", "totalAmount": 164.0},
                 {"id": "b10", "dueDate": "2026-10-17T00:00:00.000Z", "billClosingDate": "2026-10-09"},
             ])
         if path == "/transactions":
@@ -299,3 +299,17 @@ def test_sync_removes_bill_payment_imported_before(client, calls):
     imp = wait(client, client.post("/api/bank/sync").json()["id"])
     assert any("Removi 1 lançamento" in w for w in imp["warnings"])
     assert all(t["external_id"] != "pluggy:i3" for t in client.get("/api/transactions").json())
+
+
+def test_check_compares_bills_with_what_was_imported(client, calls):
+    client.post("/api/bank/config", json={"client_id": "id", "client_secret": "segredo", "item_ids": "santander"})
+    imp = wait(client, client.post("/api/bank/sync").json()["id"])
+    keys = ("date", "description", "merchant", "amount_cents", "category", "installment", "notes", "source",
+            "external_id", "bill_month")
+    client.post(f"/api/imports/{imp['id']}/confirm",
+                json={"transactions": [{k: t[k] for k in keys} for t in imp["transactions"]]})
+    card = client.get("/api/bank/check").json()["cards"][0]
+    assert card["source"] == "Santander cartão" and (card["closing_day"], card["due_day"]) == (9, 17)
+    sept = next(m for m in card["months"] if m["month"] == "2026-09")
+    # Bill of September: 164,00 at the bank; imported 99Food 54,90 + Estab 80,00 + Xpto 64,00 - estorno 39,90.
+    assert sept["bank_cents"] == 16400 and sept["app_cents"] == 15900 and sept["count"] == 4

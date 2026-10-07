@@ -1384,6 +1384,7 @@
     const errEl = $("#bank-error");
     if (!b) return;
     $("#bank-sync-btn").hidden = !b.configured;
+    $("#bank-check-btn").hidden = !b.configured;
     $("#bank-edit-btn").textContent = b.configured ? "⚙️ Configurar" : "🔗 Conectar bancos";
     errEl.hidden = !b.error;
     errEl.textContent = b.error || "";
@@ -1453,6 +1454,68 @@
     } finally {
       btn.disabled = false;
       btn.textContent = "💾 Testar e salvar";
+    }
+  }
+
+  // Each card bill as the bank reports it, next to the sum of what was imported.
+  async function checkBank() {
+    const btn = $("#bank-check-btn");
+    const el = $("#bank-check");
+    btn.disabled = true;
+    el.replaceChildren(h("p", { class: "muted", text: "Consultando os bancos…" }));
+    try {
+      const { cards } = await api("/api/bank/check");
+      const date = (d) => (d ? parseDate(d).toLocaleDateString("pt-BR") : "?");
+      el.replaceChildren(
+        ...(cards.length ? cards : [null]).map((card) => {
+          if (!card) return h("p", { class: "muted", text: "Nenhum cartão de crédito nessas conexões." });
+          const rows = card.months.map((m) => {
+            const diff = m.bank_cents == null ? null : m.app_cents - m.bank_cents;
+            const ok = diff != null && Math.abs(diff) <= 100;
+            return h(
+              "tr",
+              {},
+              h("td", { text: `${cap(monthLabel(m.month))}${m.open ? " (aberta)" : ""}` }),
+              h("td", { class: "num", style: "text-align:right", text: m.bank_cents == null ? "—" : fmt(m.bank_cents) }),
+              h("td", { class: "num", style: "text-align:right", text: `${fmt(m.app_cents)} (${m.count})` }),
+              h("td", {
+                class: diff == null ? "muted" : ok ? "match-ok" : "match-bad",
+                style: "text-align:right",
+                text: diff == null ? (m.open ? "fatura ainda aberta" : "o banco não informou") : ok ? "✓ bate" : `${diff > 0 ? "+" : "−"}${fmt(Math.abs(diff))}`,
+              }),
+              h("td", { class: "muted", style: "font-size:12px", text: m.first ? `compras de ${date(m.first)} a ${date(m.last)}` : "" })
+            );
+          });
+          const others = Object.entries(card.other_months || {}).sort().reverse().slice(0, 4);
+          const cycle = [
+            `fecha dia ${card.closing_day ?? "?"}, vence dia ${card.due_day ?? "?"}`,
+            card.balance_cents != null && `saldo no banco ${fmt(card.balance_cents)}`,
+            card.balance_close_date && `fechamento atual ${date(card.balance_close_date)}`,
+            card.balance_due_date && `vencimento atual ${date(card.balance_due_date)}`,
+          ].filter(Boolean);
+          return h(
+            "div",
+            { style: "margin-top:16px" },
+            h("b", { text: card.source }),
+            h("div", { class: "muted", style: "font-size:12px", text: cycle.join(" · ") }),
+            h(
+              "div",
+              { class: "table-scroll" },
+              h(
+                "table",
+                { class: "review-table" },
+                h("thead", {}, h("tr", {}, h("th", { text: "Fatura (vencimento)" }), h("th", { text: "Banco", style: "text-align:right" }), h("th", { text: "No app", style: "text-align:right" }), h("th", { text: "Diferença", style: "text-align:right" }), h("th", {}))),
+                h("tbody", {}, rows)
+              )
+            ),
+            others.length ? h("div", { class: "muted", style: "font-size:12px", text: `Outros meses no app: ${others.map(([m, v]) => `${monthLabel(m)} ${fmt(v)}`).join(" · ")}` }) : null
+          );
+        })
+      );
+    } catch (ex) {
+      el.replaceChildren(h("div", { class: "notice error", text: ex.message }));
+    } finally {
+      btn.disabled = false;
     }
   }
 
@@ -1581,6 +1644,7 @@
     $("#bank-edit-btn").addEventListener("click", () => toggleBankForm($("#bank-form").hidden));
     $("#bank-form").addEventListener("submit", saveBank);
     $("#bank-sync-btn").addEventListener("click", syncBank);
+    $("#bank-check-btn").addEventListener("click", checkBank);
     $("#fixed-form").addEventListener("submit", saveFixed);
     $("#fixed-cancel").addEventListener("click", resetFixedForm);
 

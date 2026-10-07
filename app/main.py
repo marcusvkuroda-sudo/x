@@ -9,7 +9,7 @@ import shutil
 import traceback
 from contextlib import asynccontextmanager
 from datetime import date as Date
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -610,6 +610,52 @@ def bank_config(body: BankConfig):
         raise HTTPException(400, str(exc)) from exc
     pluggy.save_settings(client_id, secret, item_ids, saved["last_sync"])
     return {"items": items}
+
+
+@app.get("/api/bank/check")
+def bank_check():
+    """Compares each card bill as the bank reports it with the sum of what was imported."""
+    s = pluggy.load_settings()
+    if not pluggy.configured(s):
+        raise HTTPException(400, "Configure a conexão com os bancos primeiro.")
+    try:
+        with pluggy.Client(s["client_id"], s["client_secret"]) as client:
+            cards = pluggy.check(client, s["item_ids"])
+    except pluggy.SyncError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    with db.session() as conn:
+        for card in cards:
+            rows = conn.execute(
+                """SELECT COALESCE(t.bill_month, i.reference_month, substr(t.date, 1, 7)) AS month,
+                          SUM(t.amount_cents) AS total, COUNT(*) AS n, MIN(t.date) AS first, MAX(t.date) AS last
+                   FROM transactions t LEFT JOIN imports i ON i.id = t.import_id
+                   WHERE t.source = ? GROUP BY month""",
+                (card["source"],),
+            ).fetchall()
+            app_by_month = {r["month"]: dict(r) for r in rows}
+            today = Date.today().isoformat()
+            # A bill listed before it closes has no final total yet: it is still the open one.
+            bank_by_month = {b["month"]: b for b in card["bills"] if not (b["closing_date"] or "") > today}
+            recent = fixed.month_key(Date.today().replace(day=1) - timedelta(days=62))
+            months = sorted(
+                {b["month"] for b in card["bills"]}
+                | ({card["open_month"]} if card["open_month"] else set())
+                | {m for m in app_by_month if m >= recent}
+            )
+            card["months"] = [
+                {
+                    "month": m,
+                    "bank_cents": bank_by_month[m]["total_cents"] if m in bank_by_month else None,
+                    "app_cents": (app_by_month.get(m) or {}).get("total") or 0,
+                    "count": (app_by_month.get(m) or {}).get("n") or 0,
+                    "first": (app_by_month.get(m) or {}).get("first"),
+                    "last": (app_by_month.get(m) or {}).get("last"),
+                    "open": m not in bank_by_month and m >= (card["open_month"] or "9999"),
+                }
+                for m in months
+            ]
+            card["other_months"] = {m: r["total"] for m, r in app_by_month.items() if m not in months}
+    return {"cards": cards}
 
 
 def _run_bank_sync(import_id: int) -> None:
