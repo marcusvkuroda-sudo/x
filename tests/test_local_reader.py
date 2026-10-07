@@ -216,7 +216,7 @@ def santander_pdf(password: str | None = "12345") -> tuple[bytes, int]:
     brl = f"{total / 100:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     y = 810
     for text in ("Santander", "Fatura do Cartão SANTANDER SX VISA", f"Vencimento 10/10/2026     Total a Pagar R$ {brl}",
-                 "Saldo anterior 1.500,00", "Detalhamento da Fatura", "MARCUS V KURODA - 4220 XXXX XXXX 1234"):
+                 "Saldo anterior 1.500,00", "Detalhamento da Fatura", "FULANO DE TAL - 1111 XXXX XXXX 1111"):
         c.drawString(40, y, text)
         y -= 12
     columns = (40, 310)
@@ -303,3 +303,131 @@ def test_statement_month_comes_with_each_transaction(client, monkeypatch):
     assert {t["bill_month"] for t in txs if t["origin"] == "import"} == {"2026-10"}
     assert next(t["bill_month"] for t in txs if t["origin"] == "manual") == "2026-09"
     assert sum(t["amount_cents"] for t in txs if t["bill_month"] == "2026-10") == total
+
+
+# Text exactly as pypdf extracts a real Santander statement (layout mode), with made-up
+# merchants and values: headers above their values, the previous bill paid by automatic
+# debit, a marker column glued to amounts ("-0,023", "0,00314/08...") and two columns mixed.
+SANTANDER_REAL_LAYOUT = [
+    """                                                                                1/4
+      Olá, Fulano! Esta é a fatura do seu cartão SANTANDER                      FULANO DE TAL - 1111 XXXX XXXX 1111
+      ELITE MASTERCARD contendo compras e pagamentos
+      realizados até 10/09.                                        Total a Pagar          Vencimento            Seu limite é
+                                                                   R$ 2.097,05            17/09/2026            R$30.000,00
+      1    Pagamento Total                    R$2.097,05Limite utilizadoLimite Disponível:Melhor dia para
+      Histórico de Faturas      Pagamento     Período das compras
+      AGO.      R$ 900,00        R$900,00      11/07/26 a 10/08/26
+      SET.      R$ 2.097,05      Esta Fatura   11/08/26 a 10/09/26
+      OUT.      R$ 310,70        Fatura Aberta 11/09/26 a 09/10/26
+""",
+    """                                                                                2/4
+      Detalhamento da Fatura
+      FULANO DE TAL -     1111 XXXX XXXX 1111          20/07      AMAZON BR                 02/02      54,34
+        Pagamento e Demais Créditos                  3   24/07      LAB VETERINARIO           02/03      111,68
+        Compra    Data     Descrição      Parcela    R$      US$          27/08    MP *MERCADOLIVRE    01/03    30,73
+      17/08    DEB    AUTOM    DE FATURA EM C/            -900,00         27/08    AMAZONMKTPLC*LOJA   01/06    40,97
+      VALOR TOTAL                                          0,00     0,00
+      Despesas
+      Compra    Data     Descrição      Parcela    R$      US$
+      08/08      TIM*11999999999                     66,99
+        Parcelamentos                                         09/08      IFD*PIZZARIA CENTRAL     0,90
+      18/12      MERCADOLIVRE*MERCADOL      09/12      46,37      3   09/08    MERCADO EXTRA 1765     33,58
+      VALOR TOTAL                                  113,27          0,00314/08RESTURANTE CENTRAL         196,91
+        Pagamento e Demais Créditos                  3   15/08      SUPERMERCADO BOM        938,64
+        Compra    Data     Descrição      Parcela    R$      US$3   13/08      PADARIA SOL      36,73
+      15/06      DL*ALIEXPRESS BR                    -7,29     3    15/08    POSTO SHELL      63,60
+      24/07      LAB VETERINARIO                     -0,023    15/08    99FOOD *BURGER CENTRO    31,49
+      05/09      99FOOD *ZAMP S A                    -19,70
+""",
+    """                                                                                3/4
+      Despesas
+      Compra    Data     Descrição      Parcela    R$      US$
+      21/08      99FOOD *PIZZARIA NOVA        10,98       VALOR TOTAL        1.091,51       0,00
+      23/08      GOOGLE YOUTUBEPREMIUM        53,90       Resumo da Fatura
+      24/08      AMAZONMKTPLC*LOJA            21,99       Saldo Anterior                       900,00
+      31/08      AMAZONMKTPLC*LOJA            -21,99      (+) Total Despesas/Débitos no Brasil  2.146,05
+      06/09      CONTA VIVO                   110,99      (-) Total de pagamentos              900,00
+      08/09      PORTO ALUGUEL                295,26      (-) Total de créditos                49,00
+                                                          (=) Saldo Desta Fatura               2.097,05
+      Compras parceladas com e sem juros: operações de        472,33
+""",
+]
+
+
+def test_real_santander_layout_adds_up_to_the_statement():
+    r = local_reader.parse_statement_text(SANTANDER_REAL_LAYOUT, today=date(2026, 10, 5))
+    txs = r["transactions"]
+    assert r["due_date"] == "2026-09-17" and r["reference_month"] == "2026-09"
+    assert r["statement_total_cents"] == 209705
+    assert not any("DEB" in t["description"] for t in txs)  # the paid previous bill is not spending
+    assert sum(t["amount_cents"] for t in txs if t["amount_cents"] > 0) == 214605  # Despesas no Brasil
+    assert sum(t["amount_cents"] for t in txs if t["amount_cents"] < 0) == -4900  # Créditos
+    assert sum(t["amount_cents"] for t in txs) == 209705 and r["warnings"] == []
+    by = {t["description"]: t for t in txs}
+    assert by["RESTURANTE CENTRAL"]["amount_cents"] == 19691  # glued to "0,00 3 14/08"
+    assert by["RESTURANTE CENTRAL"]["category"] == "restaurantes"
+    assert by["LAB VETERINARIO"]["amount_cents"] == -2  # "-0,023" is -0,02 plus a marker
+    assert by["99FOOD *BURGER CENTRO"]["category"] == "restaurantes"
+    assert by["99FOOD *BURGER CENTRO"]["merchant"] == "99Food - Burger Centro"
+    # 9th installment of a December purchase: counted when charged, purchase date kept in the notes.
+    assert by["MERCADOLIVRE*MERCADOL 09/12"]["date"] == "2026-09-07"
+    assert "data da compra: 2025-12-18" in by["MERCADOLIVRE*MERCADOL 09/12"]["notes"]
+
+
+def test_mismatch_with_the_statement_total_is_reported():
+    pages = [SANTANDER_REAL_LAYOUT[0], SANTANDER_REAL_LAYOUT[1].replace("RESTURANTE CENTRAL         196,91", "")]
+    r = local_reader.parse_statement_text(pages, today=date(2026, 10, 5))
+    assert any("não bate" in w for w in r["warnings"])
+
+
+def test_account_extract_keeps_bills_and_each_month():
+    data = """data;descricao;valor
+05/07/2026;Pix enviado - Padaria;-15,50
+10/07/2026;Pagamento de boleto ENEL;-230,00
+01/08/2026;Salario;5000,00
+12/08/2026;Compra no debito MERCADO;-120,00
+10/09/2026;Pagamento fatura cartao;-1500,00
+11/09/2026;Aplicacao CDB;-300,00
+15/09/2026;Saldo do dia;-30,00
+""".encode()
+    r = local_reader.parse_csv(data, "extrato.csv")
+    assert [t["description"] for t in r["transactions"]] == [
+        "Pix enviado - Padaria", "Pagamento de boleto ENEL", "Compra no debito MERCADO"]
+    # Three months of an account: each entry counts in its own month, not all in September.
+    assert r["reference_month"] is None
+
+
+def test_card_export_still_skips_the_bill_payment():
+    data = "date,title,amount\n2026-09-01,Uber,23.40\n2026-09-05,Pagamento recebido,-500.00\n2026-09-06,Estorno Uber,-23.40\n".encode()
+    r = local_reader.parse_csv(data, "nubank.csv")
+    assert [(t["description"], t["amount_cents"]) for t in r["transactions"]] == [("Uber", 2340), ("Estorno Uber", -2340)]
+    assert r["reference_month"] == "2026-09"
+
+
+def test_ofx_with_brazilian_amounts():
+    ofx = b"""OFXHEADER:100
+<OFX><BANKTRANLIST>
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20260912<TRNAMT>-1.234,56<MEMO>ALUGUEL</STMTTRN>
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20260913<TRNAMT>-12,50<MEMO>PADARIA</STMTTRN>
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20260914<TRNAMT>-7.50<MEMO>CAFE</STMTTRN>
+</BANKTRANLIST></OFX>"""
+    r = local_reader.parse_ofx(ofx, "x.ofx")
+    assert [t["amount_cents"] for t in r["transactions"]] == [123456, 1250, 750]
+
+
+def test_credit_card_charges_are_not_refunds():
+    pages = ["""Vencimento 17/09/2026
+12/08 ANUIDADE CARTAO DE CREDITO 10/12 35,00
+15/08 JUROS DE CREDITO ROTATIVO 45,10
+16/08 ESTORNO ANUIDADE 35,00
+17/08 CREDITO LOJA Y 10,00
+Total a pagar R$ 35,10
+"""]
+    r = local_reader.parse_statement_text(pages)
+    assert [t["amount_cents"] for t in r["transactions"]] == [3500, 4510, -3500, -1000]
+    assert r["warnings"] == []
+
+
+def test_mismatch_message_keeps_its_punctuation():
+    r = local_reader.parse_statement_text(["Vencimento 17/09/2026\n12/08 LOJA 1.035,00\nTotal a pagar R$ 5,00\n"])
+    assert "R$ 1.030,00 sobrando. Confira" in r["warnings"][0]

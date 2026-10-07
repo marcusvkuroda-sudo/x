@@ -42,19 +42,20 @@
   // from cards with the same label. Names can't be trusted, so a purchase is identified by
   // its number of installments, the installment value and the month it started
   // (statement month minus installments already paid, with one month of slack because the
-  // first installment carries the purchase date). Lines of one statement are always
-  // different purchases, even when identical.
+  // first installment may carry the purchase date). Lines of one statement are always
+  // different purchases, even when identical. A bank sync brings several statements at once,
+  // so a statement is an import plus its statement month.
   function activeInstallments(txs, today = new Date()) {
     const cutoff = iso(new Date(today.getTime() - INSTALLMENTS_STALE_DAYS * 864e5));
     const monthIndex = (d) => +d.slice(0, 4) * 12 + +d.slice(5, 7) - 1;
     const cleanName = (t) => (t.merchant || t.description).replace(/\s*(parc(ela)?\.?\s*)?\d{1,3}\s*\/\s*\d{1,3}\s*$/i, "").trim();
-    const batches = new Map(); // statement (import) or manual entry date -> lines
+    const batches = new Map(); // statement (import + statement month) or manual entry date -> lines
     for (const t of txs) {
       const m = /^(\d+)\/(\d+)$/.exec(t.installment || "");
       if (!m || +m[2] < 2) continue;
-      const key = t.import_id ? `i${t.import_id}` : `m${t.date}`;
+      const key = t.import_id ? `i${t.import_id}:${t.bill_month || ""}` : `m${t.date}`;
       if (!batches.has(key)) batches.set(key, []);
-      batches.get(key).push({ t, k: +m[1], n: +m[2], start: monthIndex(t.date) - (+m[1] - 1) });
+      batches.get(key).push({ t, k: +m[1], n: +m[2], start: monthIndex(t.bill_month || t.date) - (+m[1] - 1) });
     }
     const lastDate = (lines) => lines.reduce((a, l) => (l.t.date > a ? l.t.date : a), "");
     const purchases = [];

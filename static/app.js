@@ -16,6 +16,7 @@
     ["all", "Tudo"],
   ];
   const TX_PAGE = 150;
+  const VIEWS = ["dashboard", "transactions", "fixed", "import"];
 
   const state = {
     meta: { categories: [], sources: [] },
@@ -36,6 +37,9 @@
     similar: null, // transactions from the same place as the one being edited
     txLimit: TX_PAGE,
     basis: "bill", // "bill": month of the statement · "purchase": purchase date
+    bank: null, // Open Finance settings (never includes the secret)
+    fixed: [],
+    editingFixed: null,
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -168,16 +172,19 @@
 
   function setView(view) {
     state.view = view;
-    for (const v of ["dashboard", "transactions", "import"]) $(`#view-${v}`).hidden = v !== view;
+    for (const v of VIEWS) $(`#view-${v}`).hidden = v !== view;
     document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-current", t.dataset.view === view ? "page" : "false"));
     if (location.hash !== `#${view}`) history.replaceState(null, "", `#${view}`);
     window.Charts.tooltip.hide();
     render();
+    if (view === "import") loadBank(true);
+    if (view === "fixed") safely(loadFixed)();
   }
 
   function render() {
     if (state.view === "dashboard") renderDashboard();
     else if (state.view === "transactions") renderTransactions();
+    else if (state.view === "fixed") renderFixed();
     else renderImport();
   }
 
@@ -367,7 +374,13 @@
     }
 
     // Monthly series: 12 months ending at the period's last month (or the whole period if longer, max 24).
-    const endMonth = startOfMonth(period.end > t0 && state.preset === "all" ? t0 : period.end);
+    let endMonth = startOfMonth(period.end > t0 && state.preset === "all" ? t0 : period.end);
+    // By statement month, the open bill may already count in a coming month: show it too.
+    if (period.end >= t0) {
+      const limit = monthKey(addMonths(startOfMonth(t0), 2));
+      const ahead = scoped.map(monthOf).filter((m) => m > monthKey(endMonth) && m <= limit).sort().pop();
+      if (ahead) endMonth = parseDate(`${ahead}-01`);
+    }
     const nMonths = Math.min(24, Math.max(12, monthsSpanned(period.start, period.end)));
     const monthKeys = [];
     for (let i = nMonths - 1; i >= 0; i--) monthKeys.push(monthKey(addMonths(endMonth, -i)));
@@ -664,7 +677,7 @@
       shown += visible.length;
       const rows = visible.map((t) => {
         const c = cmap[t.category] || cmap.outros;
-        const meta = [fmtDay.format(parseDate(t.date)), c.label, t.source, t.installment && `parcela ${t.installment}`, t.notes].filter(Boolean).join(" · ");
+        const meta = [fmtDay.format(parseDate(t.date)), c.label, t.origin === "fixed" && "🔁 fixo", t.source, t.installment && `parcela ${t.installment}`, t.notes].filter(Boolean).join(" · ");
         return h(
           "button",
           { class: "tx", type: "button", onclick: () => openTxModal(t) },
@@ -937,6 +950,7 @@
         const changed = before.some((id) => state.imports.find((i) => i.id === id)?.status !== "processing");
         if (settleUpload() || changed) {
           if (state.view === "import") renderImport();
+          if (changed) loadBank();
         }
         if (!state.imports.some((i) => i.status === "processing")) {
           clearInterval(pollTimer);
@@ -962,8 +976,13 @@
             h(
               "div",
               {},
-              h("b", { text: "Lendo a fatura…" }),
-              h("div", { class: "muted", text: `${imp.filenames.join(", ")} · ${state.meta.reader === "claude" ? "costuma levar de 30 segundos a 2 minutos" : "leva poucos segundos"}. Pode sair desta tela.` })
+              h("b", { text: isBankSync(imp) ? "Buscando os gastos nos bancos…" : "Lendo a fatura…" }),
+              h("div", {
+                class: "muted",
+                text: isBankSync(imp)
+                  ? "Open Finance · costuma levar menos de um minuto. Pode sair desta tela."
+                  : `${imp.filenames.join(", ")} · ${state.meta.reader === "claude" ? "costuma levar de 30 segundos a 2 minutos" : "leva poucos segundos"}. Pode sair desta tela.`,
+              })
             )
           )
         );
@@ -980,6 +999,7 @@
 
   async function reviewCard(id) {
     const detail = await api(`/api/imports/${id}`);
+    const bank = detail.document_type === "open_finance";
     if (!state.review[id]) {
       state.review[id] = {
         source: detail.source || detail.issuer || "",
@@ -995,6 +1015,9 @@
           installment: t.installment,
           notes: t.notes,
           dup: t.possible_duplicate,
+          source: t.source || "",
+          external_id: t.external_id || null,
+          bill_month: t.bill_month || null,
         })),
       };
     }
@@ -1004,6 +1027,8 @@
     sourceInput.addEventListener("input", () => (review.source = sourceInput.value));
 
     const stats = h("div", { class: "review-stats" });
+    // Double-check against the statement: what was read must add up to its printed total.
+    const check = h("div", { class: "notice", style: "margin-bottom:16px" });
     const updateStats = () => {
       const included = rows.filter((r) => r.include);
       const total = included.reduce((a, r) => a + (parseAmount(r.amount) || 0), 0);
@@ -1011,9 +1036,23 @@
         h("div", {}, h("span", { text: "Selecionados" }), h("b", { text: `${included.length} de ${rows.length}` })),
         h("div", {}, h("span", { text: "Soma" }), h("b", { text: fmt(total) })),
       ];
-      if (detail.statement_total_cents != null) {
+      if (bank) {
+        check.className = "notice";
+        check.replaceChildren(h("b", { text: "Direto do banco: " }), "pagamentos de fatura, transferências entre contas e dinheiro recebido já ficaram de fora.");
+      } else if (detail.statement_total_cents == null) {
+        check.className = "notice";
+        check.replaceChildren(h("b", { text: "Não achei o total da fatura para conferir. " }), "Compare a soma com o valor do PDF antes de importar.");
+      } else {
         const allTotal = rows.reduce((a, r) => a + (parseAmount(r.amount) || 0), 0);
         const diff = allTotal - detail.statement_total_cents;
+        const ok = Math.abs(diff) <= 1;
+        check.className = ok ? "notice ok" : "notice error";
+        check.replaceChildren(
+          h("b", { text: ok ? "✓ Conferido: " : "⚠ A soma não bate com a fatura: " }),
+          ok
+            ? `os ${rows.length} lançamentos somam ${fmt(allTotal)}, exatamente o total da fatura.`
+            : `os lançamentos somam ${fmt(allTotal)} e a fatura diz ${fmt(detail.statement_total_cents)} (${diff < 0 ? "faltam" : "sobram"} ${fmt(Math.abs(diff))}). Confira antes de importar.`
+        );
         items.push(
           h(
             "div",
@@ -1028,6 +1067,7 @@
       }
       stats.replaceChildren(...items);
     };
+    const warnings = detail.warnings.filter((w) => !w.startsWith("A soma lida não bate"));
     updateStats();
 
     const catOptions = state.meta.categories.map((c) => [c.key, `${c.icon} ${c.label}`]);
@@ -1073,6 +1113,7 @@
       if (r.installment) tags.push(h("span", { class: "tag info", text: `parcela ${r.installment}` }));
       if (parseAmount(r.amount) < 0) tags.push(h("span", { class: "tag info", text: "estorno/crédito" }));
       if (r.dup) tags.push(h("span", { class: "tag", text: `possível duplicado de “${r.dup}”` }));
+      if (bank && r.source) tags.push(h("span", { class: "tag info", text: r.source }));
       if (r.notes) tags.push(h("span", { class: "tag info", text: r.notes }));
       tr.append(h("td", {}, check), h("td", {}, dateIn), h("td", { class: "desc-cell" }, descIn, tags.length ? h("div", {}, tags) : null), h("td", {}, catSel), h("td", {}, amtIn));
       return tr;
@@ -1102,6 +1143,9 @@
           category: r.category,
           installment: r.installment,
           notes: r.notes || "",
+          source: r.source || "",
+          external_id: r.external_id,
+          bill_month: r.bill_month,
           remember: r.category !== r.initialCategory,
         });
       }
@@ -1154,13 +1198,19 @@
       h(
         "div",
         { class: "card-head" },
-        h("div", {}, h("h2", { class: "card-title", text: `👀 Revisar: ${titleBits[0] || detail.filenames.join(", ")}` }), h("p", { class: "card-sub", text: titleBits.slice(1).join(" · ") || detail.filenames.join(", ") }))
+        h(
+          "div",
+          {},
+          h("h2", { class: "card-title", text: `👀 Revisar: ${titleBits[0] || detail.filenames.join(", ")}` }),
+          h("p", { class: "card-sub", text: bank ? "Gastos novos vindos do Open Finance" : titleBits.slice(1).join(" · ") || detail.filenames.join(", ") })
+        )
       ),
       rows.length && rows.every((r) => r.dup)
         ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "Parece que esta fatura já foi importada: " }), "todos os lançamentos já existem com a mesma data e valor. Se for o caso, é só descartar.")
         : null,
-      detail.warnings.length ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "Atenção:" }), h("ul", {}, detail.warnings.map((w) => h("li", { text: w })))) : null,
-      h("div", { class: "review-head" }, stats, h("label", { class: "field", style: "min-width:200px" }, h("span", { text: "Cartão / conta" }), sourceInput)),
+      check,
+      warnings.length ? h("div", { class: "notice", style: "margin-bottom:16px" }, h("b", { text: "Atenção:" }), h("ul", {}, warnings.map((w) => h("li", { text: w })))) : null,
+      h("div", { class: "review-head" }, stats, bank ? null : h("label", { class: "field", style: "min-width:200px" }, h("span", { text: "Cartão / conta" }), sourceInput)),
       rows.length
         ? h(
             "div",
@@ -1176,6 +1226,314 @@
       errEl,
       h("div", { class: "review-actions" }, discardBtn, rows.length ? confirmBtn : null)
     );
+  }
+
+  /* ------------------------------------------------------------ fixed expenses */
+
+  async function loadFixed() {
+    state.fixed = await api("/api/fixed");
+    renderFixed();
+  }
+
+  function renderFixed() {
+    const cmap = catMap();
+    const sel = $("#fx-cat");
+    if (!sel.options.length) sel.append(...state.meta.categories.map((c) => h("option", { value: c.key, text: `${c.icon} ${c.label}` })));
+    if (!state.editingFixed && !$("#fx-start").value) resetFixedForm();
+    const current = monthKey(today());
+    const active = state.fixed.filter((f) => f.start_month <= current && (!f.end_month || f.end_month >= current));
+    $("#fixed-sub").textContent = state.fixed.length
+      ? `${fmt(sum(active))} por mês em ${plural(active.length, "gasto fixo ativo", "gastos fixos ativos")}`
+      : "Entram como lançamento em cada mês; dá para editar um mês específico em Lançamentos.";
+    const short = (m) => `${MONTHS_SHORT[+m.slice(5, 7) - 1]}/${m.slice(0, 4)}`;
+    $("#fixed-list").replaceChildren(
+      ...(state.fixed.length
+        ? state.fixed.map((f) => {
+            const c = cmap[f.category] || cmap.outros;
+            const ended = f.end_month && f.end_month < current;
+            const meta = [
+              c.label,
+              `todo dia ${f.day}`,
+              `desde ${short(f.start_month)}`,
+              f.end_month && `até ${short(f.end_month)}`,
+              f.source,
+              ended && "encerrado",
+            ].filter(Boolean);
+            const edit = h("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Editar", onclick: () => editFixed(f) });
+            const del = h("button", { class: "btn btn-sm btn-ghost btn-danger", type: "button", text: "Excluir", onclick: safely(() => deleteFixed(f)) });
+            return h(
+              "div",
+              { class: "history-row fixed-row", style: ended ? "opacity:.6" : "" },
+              h("span", { class: "cat-bubble", style: `--c:${catColor(c.key)}`, text: c.icon }),
+              h("div", { style: "min-width:0" }, h("div", { class: "title", text: f.description }), h("div", { class: "meta", text: meta.join(" · ") })),
+              h("b", { class: "num", text: fmt(f.amount_cents) }),
+              h("div", { class: "fixed-actions" }, edit, del)
+            );
+          })
+        : [h("p", { class: "muted", text: "Nenhum gasto fixo ainda. Cadastre aluguel, condomínio, internet, plano de saúde… ao lado." })])
+    );
+  }
+
+  function resetFixedForm() {
+    state.editingFixed = null;
+    $("#fixed-form").reset();
+    $("#fx-cat").value = "casa";
+    $("#fx-day").value = 5;
+    $("#fx-start").value = monthKey(today());
+    $("#fixed-form-title").textContent = "Novo gasto fixo";
+    $("#fixed-cancel").hidden = true;
+    $("#fx-past-wrap").hidden = true;
+    $("#fixed-error").hidden = true;
+  }
+
+  function editFixed(f) {
+    state.editingFixed = f;
+    $("#fx-desc").value = f.description;
+    $("#fx-amount").value = amountInput(f.amount_cents);
+    $("#fx-cat").value = f.category;
+    $("#fx-day").value = f.day;
+    $("#fx-source").value = f.source;
+    $("#fx-start").value = f.start_month;
+    $("#fx-end").value = f.end_month || "";
+    $("#fx-past").checked = false;
+    $("#fx-past-wrap").hidden = false;
+    $("#fixed-form-title").textContent = `Editar: ${f.description}`;
+    $("#fixed-cancel").hidden = false;
+    $("#fixed-error").hidden = true;
+    $("#fx-desc").scrollIntoView({ behavior: "smooth", block: "center" });
+    $("#fx-desc").focus({ preventScroll: true });
+  }
+
+  async function saveFixed(e) {
+    e.preventDefault();
+    const errEl = $("#fixed-error");
+    errEl.hidden = true;
+    const cents = parseAmount($("#fx-amount").value);
+    if (!cents || isNaN(cents) || cents < 0) {
+      errEl.textContent = "Informe um valor válido (ex.: 3.200,00).";
+      errEl.hidden = false;
+      return;
+    }
+    const payload = {
+      description: $("#fx-desc").value.trim(),
+      amount_cents: cents,
+      category: $("#fx-cat").value,
+      day: +$("#fx-day").value,
+      start_month: $("#fx-start").value,
+      end_month: $("#fx-end").value || null,
+      source: $("#fx-source").value.trim(),
+    };
+    const editing = state.editingFixed;
+    const btn = $("#fixed-save");
+    btn.disabled = true;
+    try {
+      if (editing) {
+        const past = $("#fx-past").checked ? "?apply_to_past=true" : "";
+        await api(`/api/fixed/${editing.id}${past}`, jsonBody(payload, "PUT"));
+        toast("Gasto fixo atualizado");
+      } else {
+        const res = await api("/api/fixed", jsonBody(payload));
+        toast(res.created_entries ? `Gasto fixo criado e lançado em ${plural(res.created_entries, "mês", "meses")} 🔁` : "Gasto fixo criado: entra quando o mês chegar 🔁");
+      }
+      resetFixedForm();
+      await Promise.all([loadFixed(), loadTxs()]);
+    } catch (ex) {
+      errEl.textContent = validationText(ex.body?.detail) || ex.message;
+      errEl.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function deleteFixed(f) {
+    if (!confirm(`Parar o gasto fixo “${f.description}”? Ele deixa de entrar nos próximos meses.`)) return;
+    const removeAll = confirm("Apagar também os lançamentos dos meses que já passaram?\n\nOK = apagar tudo · Cancelar = manter o que já foi lançado");
+    await api(`/api/fixed/${f.id}${removeAll ? "?remove_entries=true" : ""}`, { method: "DELETE" });
+    if (state.editingFixed?.id === f.id) resetFixedForm();
+    toast("Gasto fixo removido");
+    await Promise.all([loadFixed(), loadTxs()]);
+  }
+
+  /* ------------------------------------------------------------ bank sync (Open Finance) */
+
+  const isBankSync = (imp) => imp.filenames.length === 1 && imp.filenames[0] === "Open Finance";
+
+  const BANK_STATUS = {
+    UPDATED: ["✓ atualizado", "match-ok"],
+    UPDATING: ["atualizando…", ""],
+    LOGIN_ERROR: ["⚠ reconecte no meu.pluggy.ai", "match-bad"],
+    OUTDATED: ["⚠ desatualizado: reconecte no meu.pluggy.ai", "match-bad"],
+    WAITING_USER_INPUT: ["⚠ aguardando você no meu.pluggy.ai", "match-bad"],
+  };
+
+  async function loadBank(check = false) {
+    try {
+      const prev = state.bank;
+      state.bank = await api(`/api/bank${check ? "?check=true" : ""}`);
+      // Without checking, keep the bank names and statuses already known.
+      if (!check && prev?.items.length && !state.bank.items.length) state.bank.items = prev.items;
+    } catch (_) {
+      state.bank = null;
+    }
+    renderBank();
+  }
+
+  function renderBank() {
+    const b = state.bank;
+    const el = $("#bank-status");
+    const errEl = $("#bank-error");
+    if (!b) return;
+    $("#bank-sync-btn").hidden = !b.configured;
+    $("#bank-check-btn").hidden = !b.configured;
+    $("#bank-edit-btn").textContent = b.configured ? "⚙️ Configurar" : "🔗 Conectar bancos";
+    errEl.hidden = !b.error;
+    errEl.textContent = b.error || "";
+    if (!b.configured) {
+      el.replaceChildren(
+        h("p", { class: "muted", text: "Ainda não configurado. Clique em Conectar bancos e cole o Client ID, o Client Secret e os Item IDs do dashboard.pluggy.ai." })
+      );
+      return;
+    }
+    const items = b.items.length
+      ? b.items.map((it) => {
+          const [label, cls] = BANK_STATUS[it.status] || [it.status.toLowerCase(), ""];
+          return h("li", {}, h("b", { text: it.bank }), " ", h("span", { class: cls, text: label }));
+        })
+      : b.item_ids.map((id) => h("li", { class: "muted", text: `Conexão ${id.slice(0, 8)}…` }));
+    el.replaceChildren(
+      h("ul", { class: "bank-list" }, items),
+      h("p", {
+        class: "muted",
+        text: b.last_sync
+          ? `Última sincronização: ${new Date(b.last_sync).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}. A próxima traz só o que for novo.`
+          : "Ainda não sincronizado. A primeira vez traz os últimos 90 dias.",
+      })
+    );
+  }
+
+  function toggleBankForm(show) {
+    const form = $("#bank-form");
+    form.hidden = !show;
+    if (!show) return;
+    const b = state.bank || {};
+    $("#bank-client-id").value = "";
+    $("#bank-client-id").placeholder = b.client_id || "";
+    $("#bank-client-id").required = !b.client_id;
+    $("#bank-client-secret").value = "";
+    $("#bank-client-secret").placeholder = b.has_secret ? "•••••• (deixe vazio para manter)" : "";
+    $("#bank-items").value = (b.item_ids || []).join("\n");
+    $("#bank-client-id").focus();
+  }
+
+  async function saveBank(e) {
+    e.preventDefault();
+    const btn = $("#bank-save-btn");
+    const errEl = $("#bank-error");
+    errEl.hidden = true;
+    btn.disabled = true;
+    btn.textContent = "Testando…";
+    try {
+      const res = await api(
+        "/api/bank/config",
+        jsonBody({
+          // Empty Client ID / Secret keep the saved ones.
+          client_id: $("#bank-client-id").value.trim(),
+          client_secret: $("#bank-client-secret").value.trim(),
+          item_ids: $("#bank-items").value,
+        })
+      );
+      toast(`Conectado: ${res.items.map((i) => i.bank).join(" + ")} 🎉`);
+      toggleBankForm(false);
+      state.bank = null;
+      await loadBank();
+      state.bank.items = res.items;
+      renderBank();
+    } catch (ex) {
+      errEl.textContent = validationText(ex.body?.detail) || ex.message;
+      errEl.hidden = false;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "💾 Testar e salvar";
+    }
+  }
+
+  // Each card bill as the bank reports it, next to the sum of what was imported.
+  async function checkBank() {
+    const btn = $("#bank-check-btn");
+    const el = $("#bank-check");
+    btn.disabled = true;
+    el.replaceChildren(h("p", { class: "muted", text: "Consultando os bancos…" }));
+    try {
+      const { cards } = await api("/api/bank/check");
+      const date = (d) => (d ? parseDate(d).toLocaleDateString("pt-BR") : "?");
+      el.replaceChildren(
+        ...(cards.length ? cards : [null]).map((card) => {
+          if (!card) return h("p", { class: "muted", text: "Nenhum cartão de crédito nessas conexões." });
+          const rows = card.months.map((m) => {
+            const diff = m.bank_cents == null ? null : m.app_cents - m.bank_cents;
+            const ok = diff != null && Math.abs(diff) <= 100;
+            return h(
+              "tr",
+              {},
+              h("td", { text: `${cap(monthLabel(m.month))}${m.open ? " (aberta)" : ""}` }),
+              h("td", { class: "num", style: "text-align:right", text: m.bank_cents == null ? "—" : fmt(m.bank_cents) }),
+              h("td", { class: "num", style: "text-align:right", text: `${fmt(m.app_cents)} (${m.count})` }),
+              h("td", {
+                class: diff == null ? "muted" : ok ? "match-ok" : "match-bad",
+                style: "text-align:right",
+                text: diff == null ? (m.open ? "fatura ainda aberta" : "o banco não informou") : ok ? "✓ bate" : `${diff > 0 ? "+" : "−"}${fmt(Math.abs(diff))}`,
+              }),
+              h("td", { class: "muted", style: "font-size:12px", text: m.first ? `compras de ${date(m.first)} a ${date(m.last)}` : "" })
+            );
+          });
+          const others = Object.entries(card.other_months || {}).sort().reverse().slice(0, 4);
+          const cycle = [
+            `fecha dia ${card.closing_day ?? "?"}, vence dia ${card.due_day ?? "?"}`,
+            card.balance_cents != null && `saldo no banco ${fmt(card.balance_cents)}`,
+            card.balance_close_date && `fechamento atual ${date(card.balance_close_date)}`,
+            card.balance_due_date && `vencimento atual ${date(card.balance_due_date)}`,
+          ].filter(Boolean);
+          return h(
+            "div",
+            { style: "margin-top:16px" },
+            h("b", { text: card.source }),
+            h("div", { class: "muted", style: "font-size:12px", text: cycle.join(" · ") }),
+            h(
+              "div",
+              { class: "table-scroll" },
+              h(
+                "table",
+                { class: "review-table" },
+                h("thead", {}, h("tr", {}, h("th", { text: "Fatura (vencimento)" }), h("th", { text: "Banco", style: "text-align:right" }), h("th", { text: "No app", style: "text-align:right" }), h("th", { text: "Diferença", style: "text-align:right" }), h("th", {}))),
+                h("tbody", {}, rows)
+              )
+            ),
+            others.length ? h("div", { class: "muted", style: "font-size:12px", text: `Outros meses no app: ${others.map(([m, v]) => `${monthLabel(m)} ${fmt(v)}`).join(" · ")}` }) : null
+          );
+        })
+      );
+    } catch (ex) {
+      el.replaceChildren(h("div", { class: "notice error", text: ex.message }));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function syncBank() {
+    const btn = $("#bank-sync-btn");
+    $("#bank-error").hidden = true;
+    btn.disabled = true;
+    try {
+      await api("/api/bank/sync", { method: "POST" });
+      await loadImports();
+      renderImport();
+      startPolling();
+    } catch (ex) {
+      $("#bank-error").textContent = ex.message;
+      $("#bank-error").hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   function renderHistory() {
@@ -1283,6 +1641,12 @@
       addFiles(e.dataTransfer.files);
     });
     $("#upload-btn").addEventListener("click", upload);
+    $("#bank-edit-btn").addEventListener("click", () => toggleBankForm($("#bank-form").hidden));
+    $("#bank-form").addEventListener("submit", saveBank);
+    $("#bank-sync-btn").addEventListener("click", syncBank);
+    $("#bank-check-btn").addEventListener("click", checkBank);
+    $("#fixed-form").addEventListener("submit", saveFixed);
+    $("#fixed-cancel").addEventListener("click", resetFixedForm);
 
     let resizeTimer;
     let lastWidth = window.innerWidth;
@@ -1294,7 +1658,7 @@
     });
     window.addEventListener("hashchange", () => {
       const v = location.hash.slice(1);
-      if (["dashboard", "transactions", "import"].includes(v) && v !== state.view) setView(v);
+      if (VIEWS.includes(v) && v !== state.view) setView(v);
     });
     window.addEventListener("scroll", () => window.Charts.tooltip.hide(), { passive: true });
 
@@ -1317,7 +1681,7 @@
     await Promise.all([loadMeta(), loadTxs(), loadImports()]);
     if (state.imports.some((i) => i.status === "processing")) startPolling();
     const v = location.hash.slice(1);
-    setView(["dashboard", "transactions", "import"].includes(v) ? v : "dashboard");
+    setView(VIEWS.includes(v) ? v : "dashboard");
   }
 
   boot().catch((e) => {

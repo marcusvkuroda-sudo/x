@@ -41,6 +41,27 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_imports_hash ON imports(file_hash);
 
+-- Fixed monthly expenses (rent, internet...): an entry is created for them every month.
+CREATE TABLE IF NOT EXISTS fixed_expenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    description TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    category TEXT NOT NULL,
+    day INTEGER NOT NULL,              -- day of the month (31 = last day in shorter months)
+    start_month TEXT NOT NULL,         -- YYYY-MM
+    end_month TEXT,                    -- YYYY-MM, last month included; NULL = no end
+    source TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+-- Months already created for each fixed expense: an entry deleted by hand doesn't come back.
+CREATE TABLE IF NOT EXISTS fixed_months (
+    fixed_id INTEGER NOT NULL REFERENCES fixed_expenses(id) ON DELETE CASCADE,
+    month TEXT NOT NULL,
+    PRIMARY KEY (fixed_id, month)
+);
+
 -- Category corrections made by the couple, applied to future imports.
 CREATE TABLE IF NOT EXISTS category_rules (
     key TEXT PRIMARY KEY,              -- "d:<normalized description>" or "m:<normalized merchant>"
@@ -74,6 +95,12 @@ def init() -> None:
     with session() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        # Columns added after the first version: add them to existing databases.
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(transactions)")}
+        for name, kind in (("external_id", "TEXT"), ("bill_month", "TEXT"), ("fixed_id", "INTEGER")):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE transactions ADD COLUMN {name} {kind}")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_external ON transactions(external_id)")
 
 
 def backup_daily() -> None:

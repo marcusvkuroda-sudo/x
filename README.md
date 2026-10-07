@@ -104,6 +104,45 @@ python run.py
   Anthropic, cobrada à parte da assinatura do Claude (algo como US$ 0,10 a 0,40 por fatura). CSV/OFX
   continuam sendo lidos de graça.
 
+## Bancos conectados (Open Finance, grátis)
+
+Em vez de baixar faturas, o app pode buscar os gastos direto do banco pelo **Meu Pluggy**, que é
+gratuito para as suas próprias contas (até 5 conexões, todas do mesmo titular).
+
+1. Em [meu.pluggy.ai](https://meu.pluggy.ai), conecte o Inter e o Santander (autorização pelo app de cada banco).
+2. Em [dashboard.pluggy.ai](https://dashboard.pluggy.ai), crie uma aplicação e copie o **Client ID**, o
+   **Client Secret** e o **Item ID** de cada banco conectado.
+3. No app, aba **Importar → 🏦 Bancos conectados → Conectar bancos**, cole os três e clique em
+   **Testar e salvar**. O app confere na hora se está tudo certo e mostra o nome de cada banco.
+4. Clique em **🔄 Sincronizar agora**. Os gastos chegam na mesma tela de revisão das faturas: confira,
+   ajuste categorias e importe.
+
+- A primeira sincronização traz os últimos 90 dias; as próximas só o que for novo (nada entra duas vezes).
+- Entram só **compras no cartão de crédito** (o que vai para a fatura) e **compras no cartão de débito**
+  (estacionamento, um café). Pix enviados ou recebidos, boletos, transferências, TED, salário e
+  aplicações ficam de fora: aluguel e contas vão em **Gastos fixos** (abaixo).
+- Compras no cartão contam no mês da fatura em que caem, inclusive as da fatura ainda aberta.
+- A categoria vem, nesta ordem: das correções que vocês já fizeram, do tipo do estabelecimento
+  informado pela bandeira do cartão (MCC), da categoria da Pluggy e, por último, das palavras da
+  descrição. Corrigiu uma? O app lembra nas próximas.
+- Se um banco aparecer como "reconecte no meu.pluggy.ai", renove a autorização lá (o Open Finance pede
+  isso de tempos em tempos).
+- As chaves ficam só no computador, em `data/pluggy.json` (o app nunca mostra o Client Secret de volta).
+  Quem preferir pode usar `PLUGGY_CLIENT_ID`, `PLUGGY_CLIENT_SECRET` e `PLUGGY_ITEM_IDS` no `.env`.
+- Se você já importou o PDF de uma fatura, a sincronização marca os lançamentos iguais como
+  "possível duplicado" e os deixa desmarcados.
+
+## Gastos fixos
+
+Na aba **🔁 Fixos**, cadastre uma vez o que se repete todo mês (aluguel, condomínio, internet, escola,
+plano de saúde): valor, categoria, dia e a partir de que mês. O app lança o gasto sozinho em cada mês,
+desde o mês inicial até o mês atual, e no começo de cada mês novo.
+
+- Mudou o valor (reajuste do aluguel)? Edite: vale deste mês em diante, ou marque para corrigir
+  também os meses anteriores.
+- Uma conta veio diferente num mês (luz mais cara)? Edite só aquele lançamento em **Lançamentos**.
+- Acabou? Preencha "Até" ou exclua; os meses já lançados ficam, a menos que você peça para apagar.
+
 ## Privacidade e backup
 
 - Na leitura gratuita nada sai do computador.
