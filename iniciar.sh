@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Inicia o Nossos Gastos (macOS / Linux). Na primeira vez, instala tudo sozinho.
+# Inicia o Controle dos Tolinos (macOS / Linux). Na primeira vez, instala tudo sozinho.
 set -e
 cd "$(dirname "$0")"
 
@@ -26,6 +26,6 @@ fi
 
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "Criei o arquivo .env: abra-o, cole sua ANTHROPIC_API_KEY e rode de novo."
+  echo "Criei o arquivo .env com as configurações opcionais (senha do app, porta...)."
 fi
 exec .venv/bin/python run.py

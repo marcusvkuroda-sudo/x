@@ -5,7 +5,7 @@ import sys
 # Checked before anything else: older Pythons (macOS ships 3.9) can't even import the app.
 if sys.version_info < (3, 10):
     sys.exit(
-        f"O Nossos Gastos precisa do Python 3.10 ou mais novo (este é o {sys.version.split()[0]}).\n"
+        f"O Controle dos Tolinos precisa do Python 3.10 ou mais novo (este é o {sys.version.split()[0]}).\n"
         "Instale a versão mais recente em https://www.python.org/downloads/ e rode de novo."
     )
 
@@ -35,7 +35,7 @@ def lan_ip():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
     ip = lan_ip()
-    print("\n  Nossos Gastos está rodando!")
+    print("\n  Controle dos Tolinos está rodando!")
     print(f"  Neste computador:            http://localhost:{port}")
     if ip:
         print(f"  Nos celulares (mesma Wi-Fi): http://{ip}:{port}")

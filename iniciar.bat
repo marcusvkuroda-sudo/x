@@ -1,5 +1,5 @@
 @echo off
-REM Inicia o Nossos Gastos (Windows). Na primeira vez, instala tudo sozinho.
+REM Inicia o Controle dos Tolinos (Windows). Na primeira vez, instala tudo sozinho.
 cd /d "%~dp0"
 
 if not exist .venv\Scripts\python.exe (
@@ -31,7 +31,7 @@ if errorlevel 1 (
 
 if not exist .env (
   copy .env.example .env >nul
-  echo Criei o arquivo .env: abra-o, cole sua ANTHROPIC_API_KEY e rode de novo.
+  echo Criei o arquivo .env com as configuracoes opcionais: senha do app, porta etc.
 )
 .venv\Scripts\python run.py
 pause

@@ -1,4 +1,4 @@
-# 💸 Nossos Gastos
+# 💸 Controle dos Tolinos
 
 App local para o casal controlar os gastos: lançamentos manuais, leitura automática das faturas
 do cartão (de graça) e um painel visual com tudo organizado.
@@ -8,17 +8,18 @@ Wi-Fi. Os dados ficam só nesse computador, na pasta `data/`.
 
 ## O que tem
 
-- **Painel**:
-  - Total do período comparado ao período anterior.
-  - Média por mês (sem contar o mês em andamento) ou por dia.
-  - Evolução mês a mês empilhada por categoria e ranking de categorias com a variação de cada uma.
-  - Calendário de calor dos dias, média por dia da semana e top estabelecimentos.
-  - Parcelas que ainda vão vencer.
-  - Filtros por período, mês, categoria e cartão, e modo escuro.
-  - **Mês da fatura** (padrão) ou **data da compra**: no primeiro, cada lançamento importado conta no
-    mês de vencimento da sua fatura, então o total do mês bate exatamente com a fatura do banco; no
-    segundo, conta no mês em que a compra foi feita.
-  - Quando o mês atual ainda não tem gastos (a fatura só chega depois), o painel abre no último mês que tem dados.
+- **Painel** (um mês por vez, escolhido nas setas ou nos meses logo abaixo, inclusive os próximos):
+  - **Disponível**: renda − despesas previstas do mês (faturas que vencem no mês + débito + gastos
+    fixos), com o que já foi lançado e o que ainda deve entrar até o fim do mês.
+  - **Por cartão e conta**: o valor de cada cartão de crédito (fatura fechada ou aberta, com fechamento
+    e vencimento), do débito e dos fixos, para conferir com o app de cada banco. Toque num deles para
+    ver só ele no resto do painel.
+  - Para onde vai o dinheiro (categorias), onde mais gastamos (estabelecimentos), mês a mês por tipo
+    de gasto com a renda de cada mês, e parcelas a vencer.
+  - Cada lançamento conta no mês de vencimento da fatura: o total de cada cartão bate com a fatura do banco.
+  - A fatura aberta é projetada no ritmo atual de compras até o fechamento, mais as parcelas que ainda vão cair.
+- **Planejar**: renda de vocês (todo mês ou só num mês, como bônus e 13º) e gastos fixos (aluguel,
+  condomínio...), que entram sozinhos em todos os meses.
 - **Importar fatura (gratuito)**: envie o PDF da fatura baixado do app ou site do banco (inclusive
   os protegidos por senha), ou o arquivo CSV/OFX que o banco exporta.
   - O app lê o texto do PDF e extrai cada lançamento (data, estabelecimento, valor, parcela, estornos),
@@ -31,7 +32,8 @@ Wi-Fi. Os dados ficam só nesse computador, na pasta `data/`.
   lançamentos iguais da mesma fatura. Ao editar um lançamento antigo, dá para aplicar a nova categoria
   a todos os outros do mesmo lugar de uma vez.
 - **Lançamentos**:
-  - Lista por mês com total, busca sem acento (e por valor, como "45,90") e filtros.
+  - Lista por mês da fatura com total, busca sem acento (e por valor, como "45,90") e filtros por
+    categoria, mês e cartão/conta.
   - Toque num lançamento para editar, excluir ou **duplicar**, o que é útil para aluguel, contas fixas e a próxima parcela.
   - O botão **＋ Novo gasto** adiciona um gasto manual em segundos.
   - Dá para exportar tudo em CSV.
@@ -103,6 +105,52 @@ python run.py
 - **Leitura pelo Claude (paga)**: com `ANTHROPIC_API_KEY` no `.env`, PDFs e fotos são lidos pela API da
   Anthropic, cobrada à parte da assinatura do Claude (algo como US$ 0,10 a 0,40 por fatura). CSV/OFX
   continuam sendo lidos de graça.
+
+## Bancos conectados (Open Finance, grátis)
+
+Em vez de baixar faturas, o app pode buscar os gastos direto do banco pelo **Meu Pluggy**, que é
+gratuito para as suas próprias contas (até 5 conexões, todas do mesmo titular).
+
+1. Em [meu.pluggy.ai](https://meu.pluggy.ai), conecte o Inter e o Santander (autorização pelo app de cada banco).
+2. Em [dashboard.pluggy.ai](https://dashboard.pluggy.ai), crie uma aplicação e copie o **Client ID**, o
+   **Client Secret** e o **Item ID** de cada banco conectado.
+3. No app, aba **Importar → 🏦 Bancos conectados → Conectar bancos**, cole os três e clique em
+   **Testar e salvar**. O app confere na hora se está tudo certo e mostra o nome de cada banco.
+4. Clique em **🔄 Sincronizar agora**. Os gastos chegam na mesma tela de revisão das faturas: confira,
+   ajuste categorias e importe.
+
+- A primeira sincronização traz os últimos 90 dias; as próximas só o que for novo (nada entra duas vezes).
+- Entram só **compras no cartão de crédito** (o que vai para a fatura) e **compras no cartão de débito**
+  (estacionamento, um café). Pix enviados ou recebidos, boletos, transferências, TED, salário e
+  aplicações ficam de fora: aluguel e contas vão em **Gastos fixos** (abaixo).
+- Compras no cartão contam no mês da fatura em que o banco as lançou (uma compra feita na véspera do
+  fechamento e lançada depois dele vai para a fatura seguinte, como no banco), inclusive as da fatura
+  ainda aberta. Cada sincronização relê a fatura aberta e as três anteriores e corrige o que mudou.
+- **🔍 Conferir com o banco** mostra, fatura por fatura, o total informado pelo banco ao lado da soma
+  do app. Se algo não bater, um print dessa tabela já diz onde está a diferença.
+- A categoria vem, nesta ordem: das correções que vocês já fizeram, do tipo do estabelecimento
+  informado pela bandeira do cartão (MCC), da categoria da Pluggy e, por último, das palavras da
+  descrição. Corrigiu uma? O app lembra nas próximas.
+- Se um banco aparecer como "reconecte no meu.pluggy.ai", renove a autorização lá (o Open Finance pede
+  isso de tempos em tempos).
+- As chaves ficam só no computador, em `data/pluggy.json` (o app nunca mostra o Client Secret de volta).
+  Quem preferir pode usar `PLUGGY_CLIENT_ID`, `PLUGGY_CLIENT_SECRET` e `PLUGGY_ITEM_IDS` no `.env`.
+- Se você já importou o PDF de uma fatura, a sincronização marca os lançamentos iguais como
+  "possível duplicado" e os deixa desmarcados.
+
+## Renda e gastos fixos
+
+Na aba **🎯 Planejar**, cadastre a renda de vocês (salários todo mês, ou um valor só num mês). É com
+ela que o painel calcula quanto sobra.
+
+Na mesma aba, cadastre uma vez os gastos que se repetem todo mês (aluguel, condomínio, internet, escola,
+plano de saúde): valor, categoria, dia e a partir de que mês. O app lança o gasto sozinho em cada mês,
+desde o mês inicial até o mês atual, e no começo de cada mês novo.
+
+- Mudou o valor (reajuste do aluguel)? Edite: vale deste mês em diante, ou marque para corrigir
+  também os meses anteriores.
+- Uma conta veio diferente num mês (luz mais cara)? Edite só aquele lançamento em **Lançamentos**.
+- Acabou? Preencha "Até" ou exclua; os meses já lançados ficam, a menos que você peça para apagar.
 
 ## Privacidade e backup
 

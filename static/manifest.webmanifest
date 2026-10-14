@@ -1,6 +1,6 @@
 {
-  "name": "Nossos Gastos",
-  "short_name": "Gastos",
+  "name": "Controle dos Tolinos",
+  "short_name": "Tolinos",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f9f9f7",

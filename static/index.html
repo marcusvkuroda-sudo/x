@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Nossos Gastos</title>
+  <title>Controle dos Tolinos</title>
   <meta name="theme-color" content="#2a78d6">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="Nossos Gastos">
+  <meta name="apple-mobile-web-app-title" content="Tolinos">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
@@ -15,10 +15,11 @@
 <body>
   <header class="topbar">
     <div class="topbar-inner">
-      <div class="brand"><div class="brand-mark">💸</div>Nossos Gastos</div>
+      <div class="brand"><div class="brand-mark">T</div><span>Controle dos <b>Tolinos</b></span></div>
       <nav class="tabs" aria-label="Seções">
         <button class="tab" data-view="dashboard"><span class="tab-icon">📊</span>Painel</button>
         <button class="tab" data-view="transactions"><span class="tab-icon">🧾</span>Lançamentos</button>
+        <button class="tab" data-view="plan"><span class="tab-icon">🎯</span>Planejar</button>
         <button class="tab" data-view="import"><span class="tab-icon">📥</span>Importar <span class="badge" id="import-badge" hidden></span></button>
       </nav>
       <button class="btn btn-primary btn-sm top-new" data-action="new-tx">＋ Novo gasto</button>
@@ -29,66 +30,47 @@
   <main>
     <!-- ======================================================== DASHBOARD -->
     <section id="view-dashboard" hidden>
-      <div class="filters">
-        <div class="seg" id="period-seg" role="group" aria-label="Período"></div>
-        <div class="seg" id="basis-seg" role="group" aria-label="Contar gastos por"></div>
-        <select class="input" id="month-select" aria-label="Escolher mês"></select>
-        <select class="input" id="source-select" aria-label="Cartão ou conta" hidden></select>
-      </div>
-      <div class="chips" id="cat-chips" role="group" aria-label="Categoria"></div>
+      <nav class="month-nav" aria-label="Mês">
+        <button class="icon-btn" id="month-prev" type="button" aria-label="Mês anterior">‹</button>
+        <div class="month-title">
+          <h1 id="month-title">–</h1>
+          <span class="month-when" id="month-when"></span>
+        </div>
+        <button class="icon-btn" id="month-next" type="button" aria-label="Próximo mês">›</button>
+      </nav>
+      <div class="month-strip" id="month-strip" role="tablist" aria-label="Escolher mês"></div>
 
       <div id="dash-empty" class="card empty" hidden>
         <div class="big">✨</div>
         <h3>Ainda não há gastos por aqui</h3>
-        <p>Importe uma fatura do cartão ou adicione um gasto manualmente para ver o painel ganhar vida.</p>
+        <p>Conecte os bancos, importe uma fatura ou adicione um gasto para o painel ganhar vida.</p>
         <p style="margin-top:16px; display:flex; gap:8px; justify-content:center; flex-wrap:wrap">
-          <button class="btn btn-primary" data-goto="import">📥 Importar fatura</button>
-          <button class="btn" data-action="new-tx">＋ Novo gasto</button>
+          <button class="btn btn-primary" data-goto="import">📥 Importar</button>
+          <button class="btn" data-goto="plan">🎯 Cadastrar renda e fixos</button>
         </p>
       </div>
 
       <div class="dash" id="dash">
-        <div class="kpis">
-          <div class="card kpi hero">
-            <div class="kpi-label" id="kpi-total-label">Gasto no período</div>
-            <div class="kpi-value" id="kpi-total">–</div>
-            <div class="kpi-sub" id="kpi-total-delta"></div>
-            <svg class="spark" id="kpi-spark" aria-hidden="true"></svg>
-          </div>
-          <div class="card kpi">
-            <div class="kpi-label" id="kpi-avg-label">Média por mês</div>
-            <div class="kpi-value" id="kpi-avg">–</div>
-            <div class="kpi-sub" id="kpi-avg-sub"></div>
-          </div>
-          <div class="card kpi">
-            <div class="kpi-label">Maior categoria</div>
-            <div class="kpi-cat" id="kpi-topcat"></div>
-            <div class="kpi-sub" id="kpi-topcat-sub"></div>
-          </div>
-          <div class="card kpi">
-            <div class="kpi-label">Lançamentos</div>
-            <div class="kpi-value" id="kpi-count">–</div>
-            <div class="kpi-sub" id="kpi-count-sub"></div>
-          </div>
-        </div>
-
         <div class="grid">
-          <div class="card span-8 fill">
+          <div class="card span-7 budget" id="budget"></div>
+
+          <div class="card span-5">
             <div class="card-head">
               <div>
-                <h2 class="card-title">Evolução mês a mês</h2>
-                <p class="card-sub" id="monthly-sub">Gastos por categoria, últimos 12 meses</p>
+                <h2 class="card-title">Por cartão e conta</h2>
+                <p class="card-sub">Confira cada um com o app do banco · toque para ver só ele</p>
               </div>
             </div>
-            <div class="chart fill-chart" id="chart-monthly"></div>
-            <div class="legend" id="legend-monthly"></div>
+            <div class="accounts" id="accounts"></div>
           </div>
 
-          <div class="card span-4">
+          <div class="span-12 focus-bar" id="focus-bar" hidden></div>
+
+          <div class="card span-5">
             <div class="card-head">
               <div>
                 <h2 class="card-title">Para onde vai o dinheiro</h2>
-                <p class="card-sub" id="cat-sub">Toque numa categoria para filtrar</p>
+                <p class="card-sub" id="cat-sub">Por categoria · toque para filtrar</p>
               </div>
             </div>
             <div class="compo" id="compo"></div>
@@ -98,32 +80,22 @@
           <div class="card span-7">
             <div class="card-head">
               <div>
-                <h2 class="card-title">Calendário de gastos</h2>
-                <p class="card-sub" id="heat-sub">Quanto mais escuro, mais gastamos no dia</p>
-              </div>
-            </div>
-            <div class="heat-wrap"><div class="chart" id="chart-heat"></div></div>
-            <div class="heat-legend" id="heat-legend"></div>
-          </div>
-
-          <div class="card span-5 fill">
-            <div class="card-head">
-              <div>
-                <h2 class="card-title">Dia da semana</h2>
-                <p class="card-sub">Média gasta em cada dia da semana</p>
-              </div>
-            </div>
-            <div class="week-bars" id="chart-week"></div>
-          </div>
-
-          <div class="card span-7">
-            <div class="card-head">
-              <div>
                 <h2 class="card-title">Onde mais gastamos</h2>
-                <p class="card-sub">Top estabelecimentos no período, na cor da categoria</p>
+                <p class="card-sub" id="merchants-sub">Estabelecimentos do mês, na cor da categoria</p>
               </div>
             </div>
             <div class="hbars" id="chart-merchants"></div>
+          </div>
+
+          <div class="card span-7 fill">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Mês a mês</h2>
+                <p class="card-sub" id="monthly-sub">Gastos por tipo · toque num mês para abrir</p>
+              </div>
+            </div>
+            <div class="chart fill-chart" id="chart-monthly"></div>
+            <div class="legend" id="legend-monthly"></div>
           </div>
 
           <div class="card span-5">
@@ -144,10 +116,119 @@
       <div class="tx-toolbar">
         <input class="input" id="tx-search" type="search" placeholder="Buscar por descrição, estabelecimento ou observação…">
         <select class="input" id="tx-cat" aria-label="Categoria"></select>
-        <select class="input" id="tx-month" aria-label="Mês"></select>
+        <select class="input" id="tx-month" aria-label="Mês da fatura"></select>
+        <select class="input" id="tx-source" aria-label="Cartão ou conta"></select>
         <a class="btn" href="/api/export.csv" download>⬇️ Exportar CSV</a>
       </div>
       <div id="tx-container"></div>
+    </section>
+
+    <!-- ======================================================== PLAN -->
+    <section id="view-plan" hidden>
+      <div class="card plan-summary" id="plan-summary"></div>
+      <div class="grid">
+        <div class="card span-6">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">💰 Renda</h2>
+              <p class="card-sub" id="income-sub">O que entra todo mês (salários) ou num mês só (bônus, 13º)</p>
+            </div>
+          </div>
+          <div class="history" id="income-list"></div>
+          <h3 class="form-title" id="income-form-title">Nova renda</h3>
+          <form id="income-form">
+            <label class="field">
+              <span>Descrição</span>
+              <input class="input" id="in-desc" required maxlength="200" placeholder="ex.: Salário Marcus">
+            </label>
+            <div class="form-row">
+              <label class="field">
+                <span>Valor por mês (R$)</span>
+                <input class="input" id="in-amount" inputmode="decimal" required placeholder="0,00">
+              </label>
+              <label class="field">
+                <span>Repete</span>
+                <select class="input" id="in-kind">
+                  <option value="monthly">Todo mês</option>
+                  <option value="once">Só em um mês</option>
+                </select>
+              </label>
+            </div>
+            <div class="form-row">
+              <label class="field">
+                <span id="in-start-label">A partir de</span>
+                <input class="input" id="in-start" type="month" required>
+              </label>
+              <label class="field" id="in-end-wrap">
+                <span>Até (opcional)</span>
+                <input class="input" id="in-end" type="month">
+              </label>
+            </div>
+            <div class="notice error" id="income-error" style="margin-top:12px" hidden></div>
+            <div class="form-actions">
+              <button class="btn btn-ghost" id="income-cancel" type="button" hidden>Cancelar</button>
+              <button class="btn btn-primary" id="income-save" type="submit">💾 Salvar renda</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card span-6">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">🔁 Gastos fixos</h2>
+              <p class="card-sub" id="fixed-sub">Aluguel, condomínio, internet… entram sozinhos em todos os meses</p>
+            </div>
+          </div>
+          <div class="history" id="fixed-list"></div>
+          <h3 class="form-title" id="fixed-form-title">Novo gasto fixo</h3>
+          <form id="fixed-form">
+            <label class="field">
+              <span>Descrição</span>
+              <input class="input" id="fx-desc" required maxlength="300" placeholder="ex.: Aluguel">
+            </label>
+            <div class="form-row">
+              <label class="field">
+                <span>Valor por mês (R$)</span>
+                <input class="input" id="fx-amount" inputmode="decimal" required placeholder="0,00">
+              </label>
+              <label class="field">
+                <span>Categoria</span>
+                <select class="input" id="fx-cat"></select>
+              </label>
+            </div>
+            <div class="form-row">
+              <label class="field">
+                <span>Dia do mês</span>
+                <input class="input" id="fx-day" type="number" min="1" max="31" value="5" required>
+              </label>
+              <label class="field">
+                <span>Cartão / conta (opcional)</span>
+                <input class="input" id="fx-source" list="sources-list" placeholder="ex.: Inter">
+              </label>
+            </div>
+            <div class="form-row">
+              <label class="field">
+                <span>A partir de</span>
+                <input class="input" id="fx-start" type="month" required>
+              </label>
+              <label class="field">
+                <span>Até (opcional)</span>
+                <input class="input" id="fx-end" type="month">
+                <small>Vazio = sem data para acabar.</small>
+              </label>
+            </div>
+            <label class="check" id="fx-past-wrap" style="margin-top:12px" hidden>
+              <input type="checkbox" id="fx-past">
+              <span>Corrigir também os meses que já passaram (senão a mudança vale deste mês em diante)</span>
+            </label>
+            <div class="notice error" id="fixed-error" style="margin-top:12px" hidden></div>
+            <div style="margin-top:16px; display:flex; gap:8px; justify-content:flex-end">
+              <button class="btn btn-ghost" id="fixed-cancel" type="button" hidden>Cancelar</button>
+              <button class="btn btn-primary" id="fixed-save" type="submit">💾 Salvar gasto fixo</button>
+            </div>
+          </form>
+        </div>
+      </div>
     </section>
 
     <!-- ======================================================== IMPORT -->
@@ -184,6 +265,44 @@
             <div style="margin-top:16px; display:flex; justify-content:flex-end">
               <button class="btn btn-primary" id="upload-btn" disabled>✨ Ler fatura</button>
             </div>
+          </div>
+
+          <div class="card" id="bank-card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">🏦 Bancos conectados</h2>
+                <p class="card-sub" id="bank-sub">Puxe os gastos direto do banco pelo Open Finance (Meu Pluggy, grátis).</p>
+              </div>
+            </div>
+            <div id="bank-status"></div>
+            <div class="notice error" id="bank-error" style="margin-top:12px" hidden></div>
+            <div style="margin-top:16px; display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap">
+              <button class="btn btn-ghost" id="bank-edit-btn" type="button">⚙️ Configurar</button>
+              <button class="btn" id="bank-check-btn" type="button" hidden>🔍 Conferir com o banco</button>
+              <button class="btn btn-primary" id="bank-sync-btn" type="button" hidden>🔄 Sincronizar agora</button>
+            </div>
+            <div id="bank-check"></div>
+            <form id="bank-form" style="margin-top:16px" hidden>
+              <div class="form-row">
+                <label class="field">
+                  <span>Client ID</span>
+                  <input class="input" id="bank-client-id" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+                </label>
+                <label class="field">
+                  <span>Client Secret</span>
+                  <input class="input" id="bank-client-secret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
+                  <small id="bank-secret-hint">Fica salvo só neste computador.</small>
+                </label>
+              </div>
+              <label class="field" style="margin-top:12px">
+                <span>Item IDs (um por banco)</span>
+                <textarea class="input" id="bank-items" rows="2" autocomplete="off" spellcheck="false" required placeholder="cole aqui o Item ID do Inter e o do Santander, um por linha"></textarea>
+                <small>Ficam em dashboard.pluggy.ai, na conexão de cada banco.</small>
+              </label>
+              <div style="margin-top:12px; display:flex; justify-content:flex-end">
+                <button class="btn btn-primary" id="bank-save-btn" type="submit">💾 Testar e salvar</button>
+              </div>
+            </form>
           </div>
 
         </div>

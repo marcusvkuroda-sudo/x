@@ -40,21 +40,6 @@
     return el;
   }
 
-  function cssVar(name) {
-    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  }
-
-  function luminance(color) {
-    const m = color.match(/^#?([0-9a-f]{6})$/i);
-    if (!m) return 1;
-    const n = parseInt(m[1], 16);
-    const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => {
-      v /= 255;
-      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
-    });
-    return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
-  }
-
   function niceMax(v) {
     if (v <= 0) return 100;
     const exp = Math.pow(10, Math.floor(Math.log10(v)));
@@ -147,7 +132,7 @@
     const plotW = width - m.left - m.right;
     const plotH = height - m.top - m.bottom;
     const n = months.length;
-    const maxTotal = Math.max(0, ...months.map((mo) => mo.total));
+    const maxTotal = Math.max(0, ...months.map((mo) => Math.max(mo.total, mo.limit || 0)));
     const yMax = niceMax(maxTotal);
     const y = (v) => m.top + plotH - (v / yMax) * plotH;
 
@@ -197,6 +182,12 @@
         base = top;
       });
 
+      // A reference per month (the income): a short line across the slot, on the same axis.
+      if (mo.limit) {
+        const ly = Math.round(y(mo.limit)) + 0.5;
+        svg("line", { x1: cx - slot * 0.42, x2: cx + slot * 0.42, y1: ly, y2: ly, style: "stroke:var(--ink-2);stroke-width:2;stroke-linecap:round;stroke-dasharray:4 3" }, g);
+      }
+
       if (labelled.has(i) && mo.total > 0) {
         const nearEdge = cx + 32 > width;
         const t = svg("text", { x: nearEdge ? cx + barW / 2 : cx, y: y(mo.total) - 7, "text-anchor": nearEdge ? "end" : "middle", "font-size": 11, "font-weight": 700, style: "fill:var(--ink)" }, root);
@@ -218,8 +209,9 @@
         rows: cats
           .filter((c) => mo.values[c.key])
           .sort((a, b) => mo.values[b.key] - mo.values[a.key])
-          .map((c) => ({ color: c.color, label: `${c.icon} ${c.label}`, value: fmt(mo.values[c.key]) })),
-        total: { label: "Total", value: fmt(mo.total) },
+          .map((c) => ({ color: c.color, label: `${c.icon} ${c.label}`, value: fmt(mo.values[c.key]) }))
+          .concat(mo.extra || []),
+        total: { label: "Total gasto", value: fmt(mo.total) },
       }));
       hit.addEventListener("pointerenter", () => {
         bars.querySelectorAll("g").forEach((el, j) => (el.style.opacity = j === i ? 1 : 0.3));
@@ -235,28 +227,6 @@
 
     container.appendChild(root);
   }
-
-  /* ------------------------------------------------------------ sparkline */
-
-  function sparkline(el, values, color) {
-    el.replaceChildren();
-    const box = el.getBoundingClientRect();
-    const w = box.width || 200;
-    const hgt = box.height || 60;
-    el.setAttribute("viewBox", `0 0 ${w} ${hgt}`);
-    if (values.length < 2) return;
-    const max = Math.max(...values, 1);
-    const pad = 6;
-    const pts = values.map((v, i) => [pad + (i / (values.length - 1)) * (w - pad * 2), pad + (1 - Math.max(v, 0) / max) * (hgt - pad * 2)]);
-    const line = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
-    svg("path", { d: `${line} L${pts[pts.length - 1][0]},${hgt} L${pts[0][0]},${hgt} Z`, style: `fill:${color};opacity:.1` }, el);
-    svg("path", { d: line, style: "fill:none;stroke:var(--muted);stroke-width:2;stroke-linejoin:round;stroke-linecap:round" }, el);
-    const last = pts[pts.length - 1];
-    svg("circle", { cx: last[0], cy: last[1], r: 6, style: "fill:var(--surface)" }, el);
-    svg("circle", { cx: last[0], cy: last[1], r: 4, style: `fill:${color}` }, el);
-  }
-
-  /* ------------------------------------------------------------ horizontal bars */
 
   function hbars(container, items, { onClick, compact } = {}) {
     container.replaceChildren();
@@ -291,126 +261,5 @@
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   }
 
-  function calendarHeatmap(container, legendEl, { start, end, daily, counts }) {
-    container.replaceChildren();
-    // At most one year of cells.
-    const first = new Date(Math.max(start.getTime(), end.getTime() - 364 * 864e5));
-    first.setHours(0, 0, 0, 0);
-    const gridStart = new Date(first);
-    gridStart.setDate(first.getDate() - first.getDay());
-    const weeks = Math.ceil(((end - gridStart) / 864e5 + 1) / 7);
-    const calendarMode = weeks <= 6;
-
-    const positives = [...daily.values()].filter((v) => v > 0).sort((a, b) => a - b);
-    const q = (p) => positives[Math.min(positives.length - 1, Math.floor(p * positives.length))] || 0;
-    const thresholds = [q(0.25), q(0.5), q(0.75), q(0.9)];
-    const level = (v) => (v <= 0 ? 0 : 1 + thresholds.filter((t) => v > t).length);
-    const colors = [0, 1, 2, 3, 4, 5].map((i) => cssVar(`--seq-${i}`));
-
-    const width = Math.max(container.parentElement.clientWidth, 260);
-    const gap = 3;
-    let cell, cols, rows, labelLeft, labelTop;
-    if (calendarMode) {
-      cols = 7;
-      rows = weeks;
-      labelLeft = 0;
-      labelTop = 20;
-      cell = Math.min(64, Math.floor((width - (cols - 1) * gap) / cols));
-    } else {
-      cols = weeks;
-      rows = 7;
-      labelLeft = 18;
-      labelTop = 18;
-      cell = Math.max(11, Math.min(26, Math.floor((width - labelLeft - (cols - 1) * gap) / cols)));
-    }
-    const W = labelLeft + cols * (cell + gap);
-    const H = labelTop + rows * (cell + gap);
-    const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": "Calendário de gastos por dia", style: `width:${W}px` });
-
-    if (calendarMode) {
-      WEEKDAYS.forEach((d, i) => {
-        const t = svg("text", { x: i * (cell + gap) + cell / 2, y: 12, "text-anchor": "middle", "font-size": 11, "font-weight": 600, style: "fill:var(--muted)" }, root);
-        t.textContent = d;
-      });
-    } else {
-      [1, 3, 5].forEach((i) => {
-        const t = svg("text", { x: 0, y: labelTop + i * (cell + gap) + cell * 0.75, "font-size": 10, style: "fill:var(--muted)" }, root);
-        t.textContent = WEEKDAYS[i];
-      });
-    }
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    let lastMonth = -1;
-    const fmtDay = new Intl.DateTimeFormat("pt-BR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
-
-    for (let d = new Date(gridStart); d <= end; d.setDate(d.getDate() + 1)) {
-      if (d < first) continue;
-      const idx = Math.round((d - gridStart) / 864e5);
-      const week = Math.floor(idx / 7);
-      const dow = d.getDay();
-      const col = calendarMode ? dow : week;
-      const row = calendarMode ? week : dow;
-      const x = labelLeft + col * (cell + gap);
-      const yy = labelTop + row * (cell + gap);
-      const key = iso(d);
-      const v = daily.get(key) || 0;
-      const lv = level(v);
-      const future = d > today;
-
-      if (!calendarMode && d.getMonth() !== lastMonth && dow <= 3) {
-        lastMonth = d.getMonth();
-        const t = svg("text", { x, y: 11, "font-size": 10, style: "fill:var(--muted)" }, root);
-        t.textContent = MONTHS_SHORT[d.getMonth()];
-      }
-
-      // Not focusable on purpose: a year has 365 cells; the Lançamentos list carries the same values.
-      const rect = svg("rect", { x, y: yy, width: cell, height: cell, rx: Math.min(6, cell / 4), style: `fill:${colors[lv]};opacity:${future ? 0.35 : 1};cursor:default` }, root);
-      if (calendarMode) {
-        const t = svg("text", { x: x + 7, y: yy + 16, "font-size": 11, "font-weight": 600, style: `fill:${luminance(colors[lv]) > 0.35 ? "#0b0b0b" : "#ffffff"};pointer-events:none;opacity:${future ? 0.5 : 0.85}` }, root);
-        t.textContent = d.getDate();
-      }
-      const label = fmtDay.format(d);
-      const c = counts.get(key) || 0;
-      bindTooltip(rect, () => ({
-        title: label.charAt(0).toUpperCase() + label.slice(1),
-        rows: [{ label: c === 1 ? "1 lançamento" : `${c} lançamentos`, value: fmt(v) }],
-      }));
-    }
-
-    container.appendChild(root);
-
-    legendEl.replaceChildren(h("span", { text: "Menos" }), ...colors.map((c) => h("i", { style: `background:${c}` })), h("span", { text: "Mais" }));
-    return { truncated: first > start };
-  }
-
-  /* ------------------------------------------------------------ weekday columns */
-
-  function weekBars(container, avgs, counts) {
-    container.replaceChildren();
-    const names = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
-    const full = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
-    const max = Math.max(1, ...avgs);
-    const peak = avgs.indexOf(Math.max(...avgs));
-    avgs.forEach((v, i) => {
-      const col = h(
-        "div",
-        { class: `week-col${i === peak && v > 0 ? " peak" : ""}`, tabindex: 0 },
-        h("div", { class: "val", text: v > 0 ? fmtCompact(v) : "" }),
-        // 78% leaves room for the value label above the tallest bar.
-        h("div", { class: "bar", style: `height:${(v / max) * 78}%` }),
-        h("div", { class: "lbl", text: names[i] })
-      );
-      bindTooltip(col, () => ({
-        title: `Média por ${full[i]}`,
-        rows: [
-          { label: "Gasto médio", value: fmt(v) },
-          { label: `Dias com gasto`, value: String(counts[i]) },
-        ],
-      }));
-      container.appendChild(col);
-    });
-  }
-
-  window.Charts = { fmt, fmtCompact, h, stackedColumns, sparkline, hbars, calendarHeatmap, weekBars, tooltip, bindTooltip, iso };
+  window.Charts = { fmt, fmtCompact, h, stackedColumns, hbars, tooltip, bindTooltip, iso };
 })();

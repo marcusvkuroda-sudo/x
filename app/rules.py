@@ -12,6 +12,12 @@ import unicodedata
 
 MIN_KEY_LENGTH = 3
 IGNORED_WORDS = {"parc", "parcela"}
+# Words that say how money moved, not where: "PIX ENVIADO" alone would teach a rule for every Pix.
+GENERIC_WORDS = {
+    "pix", "enviado", "enviada", "recebido", "recebida", "transferencia", "transf", "ted", "doc", "boleto",
+    "pagamento", "pagto", "pgto", "pag", "compra", "debito", "deb", "credito", "cred", "cartao", "conta",
+    "saque", "internet", "app", "via", "de", "do", "da", "dos", "das", "no", "na", "em", "para", "a", "o", "e",
+}
 
 
 def normalize(text: str) -> str:
@@ -24,7 +30,7 @@ def keys(description: str, merchant: str) -> list[str]:
     out = []
     for prefix, text in (("d:", description), ("m:", merchant)):
         key = normalize(text)
-        if len(key) >= MIN_KEY_LENGTH:
+        if len(key) >= MIN_KEY_LENGTH and not set(key.split()) <= GENERIC_WORDS:
             out.append(prefix + key)
     return out
 

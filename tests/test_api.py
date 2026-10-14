@@ -110,6 +110,23 @@ def test_duplicate_flag(client, monkeypatch):
     assert flags == ["Pizza", None]
 
 
+def test_other_installment_is_not_a_duplicate(client, monkeypatch):
+    from app import extractor
+
+    monkeypatch.setattr(extractor, "extract", fake_extract)
+    # Same date and value as the "2/10" being imported, but another installment of the purchase.
+    base = {"date": "2026-08-25", "description": "Magalu", "amount_cents": 7000, "category": "casa"}
+    client.post("/api/transactions", json={**base, "installment": "1/10"})
+    r = client.post("/api/imports", files={"files": ("foto.png", _png(), "image/png")})
+    imp = wait_for(client, r.json()["id"])
+    assert [t["possible_duplicate"] for t in imp["transactions"]] == [None, None]
+    client.delete(f"/api/imports/{imp['id']}")
+    client.post("/api/transactions", json={**base, "installment": "2/10"})
+    r = client.post("/api/imports", files={"files": ("foto.png", _png(), "image/png")})
+    imp = wait_for(client, r.json()["id"])
+    assert [t["possible_duplicate"] for t in imp["transactions"]] == [None, "Magalu"]
+
+
 def test_encrypted_pdf_needs_password(client, monkeypatch):
     from pypdf import PdfWriter
 
