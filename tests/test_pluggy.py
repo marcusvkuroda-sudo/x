@@ -3,6 +3,8 @@
 import json
 import time
 
+from datetime import date
+
 import httpx
 import pytest
 
@@ -14,14 +16,14 @@ CARD_TXS = [
     {"id": "c2", "date": "2026-09-03T10:00:00.000Z", "description": "MAGALU", "amount": 120.0, "type": "DEBIT",
      "status": "POSTED", "creditCardMetadata": {"billId": "b10", "installmentNumber": 2, "totalInstallments": 10}},
     {"id": "c3", "date": "2026-09-04T10:00:00.000Z", "description": "Estorno NETFLIX", "amount": 39.9, "type": "CREDIT",
-     "status": "POSTED"},
+     "status": "POSTED", "creditCardMetadata": {"billId": "b9"}},
     {"id": "c4", "date": "2026-09-05T10:00:00.000Z", "description": "PAGAMENTO DE FATURA", "amount": 1500.0,
      "type": "CREDIT", "status": "POSTED"},
     # Open bill purchases come PENDING, without a bill.
     {"id": "c5", "date": "2026-10-06T10:00:00.000Z", "description": "UBER *TRIP", "amount": 23.0, "type": "DEBIT",
      "status": "PENDING"},
     {"id": "c6", "date": "2026-09-07T10:00:00.000Z", "description": "ESTAB 4421 SP", "amount": 80.0, "type": "DEBIT",
-     "status": "POSTED", "category": "Supermarket"},
+     "status": "POSTED", "category": "Supermarket", "creditCardMetadata": {"billId": "b9"}},
     # Bill still open (no billId). The card closes on the 9th and is due on the 17th.
     {"id": "c7", "date": "2026-09-20T10:00:00.000Z", "description": "DROGASIL", "amount": 30.0, "type": "DEBIT",
      "status": "POSTED"},
@@ -29,7 +31,7 @@ CARD_TXS = [
      "status": "POSTED"},
     # The merchant's MCC says what it is, even when the name and Pluggy don't.
     {"id": "c9", "date": "2026-09-08T10:00:00.000Z", "description": "ESTAB XPTO 77", "amount": 64.0, "type": "DEBIT",
-     "status": "POSTED", "category": "Shopping", "creditCardMetadata": {"payeeMCC": 5812}},
+     "status": "POSTED", "category": "Shopping", "creditCardMetadata": {"payeeMCC": 5812, "billId": "b9"}},
     # An installment dated on the original purchase: the bank's forecast wins over the cycle.
     {"id": "c10", "date": "2026-06-15T10:00:00.000Z", "description": "PADARIA REAL", "amount": 18.0, "type": "DEBIT",
      "status": "POSTED", "creditCardMetadata": {"billForecastDate": "2026-10", "installmentNumber": 4,
@@ -118,6 +120,7 @@ def fake_pluggy(calls: list):
         if path == "/v2/transactions":
             assert "dateFrom" in q and "page" not in q
             txs = {"card": CARD_TXS, "acc": ACCOUNT_TXS, "sacc": SANTANDER_ACCOUNT_TXS, "icard": INTER_CARD_TXS}[q["accountId"]]
+            txs = [t for t in txs if t["date"][:10] >= q["dateFrom"]]
             # two pages, to exercise the cursor (a base64 cursor with "+" and "=")
             half = len(txs) // 2
             if q.get("after") == "c2Vn+dW5kYQ==":
@@ -136,6 +139,7 @@ def calls(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     log = []
     monkeypatch.setattr(pluggy, "TRANSPORT", fake_pluggy(log))
+    monkeypatch.setattr(pluggy, "TODAY", date(2026, 10, 7))  # Santander's October bill still open
     return log
 
 
@@ -286,8 +290,8 @@ def test_bill_payments_left_out_and_cleaned_up(calls):
     # Open bill per card, each one to compare with its bank's app.
     open_bills = [w.split(" até")[0] for w in result["warnings"] if "fatura aberta" in w]
     assert open_bills == [
-        "Banco Inter cartão: fatura aberta que vence em 10/2026 soma R$ 80,00",
-        "Banco Inter cartão: fatura aberta que vence em 11/2026 soma R$ 150,00",  # bought after it closed (02/10)
+        # Its October bill closed on 02/10: what is still pending can only be in November's.
+        "Banco Inter cartão: fatura aberta que vence em 11/2026 soma R$ 230,00",
         "Santander cartão: fatura aberta que vence em 10/2026 soma R$ 23,00",
     ]
 
@@ -313,3 +317,112 @@ def test_check_compares_bills_with_what_was_imported(client, calls):
     sept = next(m for m in card["months"] if m["month"] == "2026-09")
     # Bill of September: 164,00 at the bank; imported 99Food 54,90 + Estab 80,00 + Xpto 64,00 - estorno 39,90.
     assert sept["bank_cents"] == 16400 and sept["app_cents"] == 15900 and sept["count"] == 4
+
+
+# ---------------------------------------------------------------- the couple's real October, anonymized
+#
+# Santander closes on the 9th and is due on the 17th; Inter closes on the 11th, due on the 18th.
+# On 14/10 the app showed R$ 320,16 too much in October's Santander bill (two purchases of 08/10
+# the bank posted after the closing, so in November's), R$ 72,19 missing in September's (refunds
+# dated on the original purchase, in June) and R$ 82,66 too much in October's Inter bill (an
+# installment posted on 13/10, after its closing).
+
+REAL_BILLS = {
+    "sant": [
+        {"id": "s-jun", "dueDate": "2026-06-17", "billClosingDate": "2026-06-09", "totalAmount": 50.0},
+        {"id": "s-sep", "dueDate": "2026-09-17", "billClosingDate": "2026-09-10", "totalAmount": 27.81},
+        {"id": "s-oct", "dueDate": "2026-10-17", "billClosingDate": "2026-10-09", "totalAmount": 250.0},
+    ],
+    "inter": [{"id": "i-oct", "dueDate": "2026-10-18", "billClosingDate": "2026-10-11", "totalAmount": 34.8}],
+}
+REAL_TXS = {
+    "sant": [
+        # Bought before September's closing, posted in October's bill.
+        {"id": "r1", "date": "2026-09-08", "description": "AMAZON BR", "amount": 150.0, "type": "DEBIT",
+         "status": "POSTED", "creditCardMetadata": {"billId": "s-oct"}},
+        {"id": "r2", "date": "2026-10-07", "description": "ATACADAO 698 AS", "amount": 100.0, "type": "DEBIT",
+         "status": "POSTED", "creditCardMetadata": {"billId": "s-oct"}},
+        # Bought on 08/10, before the closing, but still pending after it: November's bill.
+        {"id": "r3", "date": "2026-10-08", "description": "PORTO ALUGUEL", "amount": 295.26, "type": "DEBIT",
+         "status": "PENDING", "creditCardMetadata": {"billForecastDate": "2026-10"}},
+        {"id": "r4", "date": "2026-10-08", "description": "MERCADOLIVRE*SOUNDSOL", "amount": 24.9, "type": "DEBIT",
+         "status": "PENDING"},
+        # September's bill: a purchase and refunds dated on the original purchase, in June.
+        {"id": "r5", "date": "2026-09-01", "description": "UBER *TRIP", "amount": 100.0, "type": "DEBIT",
+         "status": "POSTED", "creditCardMetadata": {"billId": "s-sep"}},
+        {"id": "r6", "date": "2026-06-15", "description": "DL*ALIEXPRESS BR", "amount": 45.7, "type": "CREDIT",
+         "status": "POSTED", "creditCardMetadata": {"billId": "s-sep"}},
+        {"id": "r7", "date": "2026-06-15", "description": "DL*ALIEXPRESS BR", "amount": 26.49, "type": "CREDIT",
+         "status": "POSTED", "creditCardMetadata": {"billId": "s-sep"}},
+        # A future installment with a placeholder forecast: 4/9 of a purchase billed first in October.
+        {"id": "r8", "date": "2026-09-10", "description": "MERCADO*ARTESEDUCAO", "amount": 3.12, "type": "DEBIT",
+         "status": "PENDING", "creditCardMetadata": {"installmentNumber": 4, "totalInstallments": 9,
+                                                     "billForecastDate": "0001-01-01"}},
+        # An old bill (June): not re-imported.
+        {"id": "r9", "date": "2026-05-20", "description": "LOJA ANTIGA", "amount": 50.0, "type": "DEBIT",
+         "status": "POSTED", "creditCardMetadata": {"billId": "s-jun"}},
+    ],
+    "inter": [
+        {"id": "n1", "date": "2026-09-27", "description": "MERCADO MERCADOLIVRE", "amount": 34.8, "type": "DEBIT",
+         "status": "POSTED", "creditCardMetadata": {"billId": "i-oct", "installmentNumber": 11, "totalInstallments": 12}},
+        # 12/12 posted on 13/10, after the closing on 11/10, with a forecast pointing to the closed bill.
+        {"id": "n2", "date": "2026-10-13", "description": "MERCADOLIVRE ATLASELE", "amount": 82.66, "type": "DEBIT",
+         "status": "PENDING", "creditCardMetadata": {"installmentNumber": 12, "totalInstallments": 12,
+                                                     "billForecastDate": "2026-10"}},
+    ],
+}
+
+
+def fake_real_case():
+    def handler(request: httpx.Request) -> httpx.Response:
+        path, q = request.url.path, request.url.params
+        if path == "/auth":
+            return httpx.Response(200, json={"apiKey": "k"})
+        if path.startswith("/items/"):
+            name = path.split("/")[-1]
+            return httpx.Response(200, json={"id": name, "status": "UPDATED", "connector": {"name": name.title()}})
+        if path == "/accounts":
+            card = {"id": q["itemId"], "type": "CREDIT", "creditData": {"balanceDueDate": "2026-09-17"}}  # stale
+            return httpx.Response(200, json={"results": [card], "totalPages": 1})
+        if path == "/bills":
+            return httpx.Response(200, json={"results": REAL_BILLS[q["accountId"]], "totalPages": 1})
+        if path == "/v2/transactions":
+            txs = [t for t in REAL_TXS[q["accountId"]] if t["date"] >= q["dateFrom"]]
+            return httpx.Response(200, json={"results": txs, "next": None})
+        return httpx.Response(500)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.fixture()
+def real_case(monkeypatch):
+    for var in ("PLUGGY_CLIENT_ID", "PLUGGY_CLIENT_SECRET", "PLUGGY_ITEM_IDS"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(pluggy, "TRANSPORT", fake_real_case())
+    monkeypatch.setattr(pluggy, "TODAY", date(2026, 10, 14))
+
+
+def test_real_case_each_entry_in_its_bill(real_case):
+    with pluggy.Client("id", "segredo") as client:
+        result = pluggy.fetch(client, ["sant", "inter"], date(2026, 9, 4), set())
+    month = {t["external_id"]: t["bill_month"] for t in result["transactions"]}
+    assert month == {
+        "pluggy:r1": "2026-10", "pluggy:r2": "2026-10",  # what the bank put in October's bill
+        "pluggy:r3": "2026-11", "pluggy:r4": "2026-11",  # posted after the closing
+        "pluggy:r5": "2026-09", "pluggy:r6": "2026-09", "pluggy:r7": "2026-09",  # June refunds included
+        "pluggy:r8": "2027-01",  # 4/9 of a purchase first billed in October
+        "pluggy:n1": "2026-10", "pluggy:n2": "2026-11",
+    }  # and the June bill (r9) stays out
+
+
+def test_real_case_check_matches_the_bills(client, real_case):
+    client.post("/api/bank/config", json={"client_id": "id", "client_secret": "segredo", "item_ids": "sant inter"})
+    imp = wait(client, client.post("/api/bank/sync").json()["id"])
+    keys = ("date", "description", "merchant", "amount_cents", "category", "installment", "notes", "source",
+            "external_id", "bill_month")
+    client.post(f"/api/imports/{imp['id']}/confirm",
+                json={"transactions": [{k: t[k] for k in keys} for t in imp["transactions"]]})
+    for card in client.get("/api/bank/check").json()["cards"]:
+        for m in card["months"]:
+            if m["bank_cents"] is not None and m["month"] >= "2026-09":
+                assert m["app_cents"] == m["bank_cents"], (card["source"], m)

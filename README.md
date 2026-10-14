@@ -121,7 +121,11 @@ gratuito para as suas próprias contas (até 5 conexões, todas do mesmo titular
 - Entram só **compras no cartão de crédito** (o que vai para a fatura) e **compras no cartão de débito**
   (estacionamento, um café). Pix enviados ou recebidos, boletos, transferências, TED, salário e
   aplicações ficam de fora: aluguel e contas vão em **Gastos fixos** (abaixo).
-- Compras no cartão contam no mês da fatura em que caem, inclusive as da fatura ainda aberta.
+- Compras no cartão contam no mês da fatura em que o banco as lançou (uma compra feita na véspera do
+  fechamento e lançada depois dele vai para a fatura seguinte, como no banco), inclusive as da fatura
+  ainda aberta. Cada sincronização relê a fatura aberta e as três anteriores e corrige o que mudou.
+- **🔍 Conferir com o banco** mostra, fatura por fatura, o total informado pelo banco ao lado da soma
+  do app. Se algo não bater, um print dessa tabela já diz onde está a diferença.
 - A categoria vem, nesta ordem: das correções que vocês já fizeram, do tipo do estabelecimento
   informado pela bandeira do cartão (MCC), da categoria da Pluggy e, por último, das palavras da
   descrição. Corrigiu uma? O app lembra nas próximas.

@@ -38,6 +38,8 @@ SKIP = re.compile(
 # A section listing installments of FUTURE statements: ignore the rest of that page.
 FUTURE = re.compile(r"pr[oó]xim[ao]s? faturas?|lan[cç]amentos futuros|parcelas a vencer|saldo parcelado|compras parceladas a vencer", re.IGNORECASE)
 REFUND = re.compile(r"estorno|reembolso|devolu[cç][aã]o|cashback", re.IGNORECASE)
+# The IOF of a purchase abroad comes on its own line, without a date, right below the purchase.
+IOF_LINE = re.compile(r"^(IOF\b[^%]*?(?:exterior|internacional|despesa|compra)[^%\d]*?)(\d{1,3}(?:\.\d{3})*,\d{2})$", re.IGNORECASE)
 # "Crédito" alone also marks a credit, but not in "anuidade cartão de crédito" or "juros do
 # crédito rotativo", which are charges.
 CREDIT_WORD = re.compile(r"\bcr[eé]d(ito)?\b", re.IGNORECASE)
@@ -175,6 +177,7 @@ def _unglue(line: str) -> str:
     line = re.sub(r"(US\$|R\$)(?=\d{1,2}\s)", r"\1 ", line)
     line = re.sub(r"(?<![\d/,.])(\d)(\d{2}/\d{2})(?=[A-Za-zÀ-ú*])", r"\1 \2 ", line)
     line = re.sub(r"(?<![\d/])(\d{2}/\d{2})(?=[A-Za-zÀ-ú*])", r"\1 ", line)
+    line = re.sub(r"(?<![\d/,.])(\d{2}/\d{2})(?=\d{1,3}[A-Za-zÀ-ú])", r"\1 ", line)  # "09/0999FOOD"
     return re.sub(r"(,\d{2})(?=[A-Za-zÀ-ú])", r"\1 ", line)
 
 
@@ -273,6 +276,13 @@ def parse_statement_text(pages: list[str], today: date | None = None) -> dict:
                 continue
             if FUTURE.search(line):
                 break  # the rest of this page lists future installments
+            iof = IOF_LINE.match(re.sub(r"\s+", " ", line))
+            if iof and transactions:
+                transactions.append(
+                    {"date": transactions[-1]["date"], "description": iof.group(1).strip(), "merchant": "IOF",
+                     "amount_cents": _cents(iof.group(2)), "category": "outros", "installment": None, "notes": ""}
+                )
+                continue
             for rec in _records(line):
                 if not rec["amounts"]:
                     continue

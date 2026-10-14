@@ -431,3 +431,19 @@ Total a pagar R$ 35,10
 def test_mismatch_message_keeps_its_punctuation():
     r = local_reader.parse_statement_text(["Vencimento 17/09/2026\n12/08 LOJA 1.035,00\nTotal a pagar R$ 5,00\n"])
     assert "R$ 1.030,00 sobrando. Confira" in r["warnings"][0]
+
+
+def test_glued_date_and_iof_line_without_date():
+    # Two columns: the left one ends with a total, the right one has a date glued to "99FOOD".
+    pages = ["""Vencimento 17/10/2026
+Compra Data Descrição                 Parcela      R$        US$
+VALOR TOTAL          0,00     0,00       09/0999FOOD *PIZZARIA X              22,58
+23/09 LOJA NO EXTERIOR                         117,63       21,49
+COTAÇÃO DOLAR R$ 5,4739
+IOF  DESPESA  NO EXTERIOR                                     4,12
+Total a pagar R$ 144,33
+"""]
+    r = local_reader.parse_statement_text(pages)
+    assert [(t["date"], t["amount_cents"]) for t in r["transactions"]] == [
+        ("2026-09-09", 2258), ("2026-09-23", 11763), ("2026-09-23", 412)]
+    assert r["warnings"] == []

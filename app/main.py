@@ -9,7 +9,7 @@ import shutil
 import traceback
 from contextlib import asynccontextmanager
 from datetime import date as Date
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Literal
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -633,10 +633,10 @@ def bank_check():
                 (card["source"],),
             ).fetchall()
             app_by_month = {r["month"]: dict(r) for r in rows}
-            today = Date.today().isoformat()
+            now = pluggy.today()
             # A bill listed before it closes has no final total yet: it is still the open one.
-            bank_by_month = {b["month"]: b for b in card["bills"] if not (b["closing_date"] or "") > today}
-            recent = fixed.month_key(Date.today().replace(day=1) - timedelta(days=62))
+            bank_by_month = {b["month"]: b for b in card["bills"] if not (b["closing_date"] or "") > now.isoformat()}
+            recent = pluggy.add_months(fixed.month_key(now), -pluggy.BILLS_BACK)
             months = sorted(
                 {b["month"] for b in card["bills"]}
                 | ({card["open_month"]} if card["open_month"] else set())
