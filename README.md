@@ -1,4 +1,4 @@
-# 💸 Nossos Gastos
+# 💸 Controle dos Tolinos
 
 App local para o casal controlar os gastos: lançamentos manuais, leitura automática das faturas
 do cartão (de graça) e um painel visual com tudo organizado.
@@ -8,17 +8,18 @@ Wi-Fi. Os dados ficam só nesse computador, na pasta `data/`.
 
 ## O que tem
 
-- **Painel**:
-  - Total do período comparado ao período anterior.
-  - Média por mês (sem contar o mês em andamento) ou por dia.
-  - Evolução mês a mês empilhada por categoria e ranking de categorias com a variação de cada uma.
-  - Calendário de calor dos dias, média por dia da semana e top estabelecimentos.
-  - Parcelas que ainda vão vencer.
-  - Filtros por período, mês, categoria e cartão, e modo escuro.
-  - **Mês da fatura** (padrão) ou **data da compra**: no primeiro, cada lançamento importado conta no
-    mês de vencimento da sua fatura, então o total do mês bate exatamente com a fatura do banco; no
-    segundo, conta no mês em que a compra foi feita.
-  - Quando o mês atual ainda não tem gastos (a fatura só chega depois), o painel abre no último mês que tem dados.
+- **Painel** (um mês por vez, escolhido nas setas ou nos meses logo abaixo, inclusive os próximos):
+  - **Disponível**: renda − despesas previstas do mês (faturas que vencem no mês + débito + gastos
+    fixos), com o que já foi lançado e o que ainda deve entrar até o fim do mês.
+  - **Por cartão e conta**: o valor de cada cartão de crédito (fatura fechada ou aberta, com fechamento
+    e vencimento), do débito e dos fixos, para conferir com o app de cada banco. Toque num deles para
+    ver só ele no resto do painel.
+  - Para onde vai o dinheiro (categorias), onde mais gastamos (estabelecimentos), mês a mês por tipo
+    de gasto com a renda de cada mês, e parcelas a vencer.
+  - Cada lançamento conta no mês de vencimento da fatura: o total de cada cartão bate com a fatura do banco.
+  - A fatura aberta é projetada no ritmo atual de compras até o fechamento, mais as parcelas que ainda vão cair.
+- **Planejar**: renda de vocês (todo mês ou só num mês, como bônus e 13º) e gastos fixos (aluguel,
+  condomínio...), que entram sozinhos em todos os meses.
 - **Importar fatura (gratuito)**: envie o PDF da fatura baixado do app ou site do banco (inclusive
   os protegidos por senha), ou o arquivo CSV/OFX que o banco exporta.
   - O app lê o texto do PDF e extrai cada lançamento (data, estabelecimento, valor, parcela, estornos),
@@ -31,7 +32,8 @@ Wi-Fi. Os dados ficam só nesse computador, na pasta `data/`.
   lançamentos iguais da mesma fatura. Ao editar um lançamento antigo, dá para aplicar a nova categoria
   a todos os outros do mesmo lugar de uma vez.
 - **Lançamentos**:
-  - Lista por mês com total, busca sem acento (e por valor, como "45,90") e filtros.
+  - Lista por mês da fatura com total, busca sem acento (e por valor, como "45,90") e filtros por
+    categoria, mês e cartão/conta.
   - Toque num lançamento para editar, excluir ou **duplicar**, o que é útil para aluguel, contas fixas e a próxima parcela.
   - O botão **＋ Novo gasto** adiciona um gasto manual em segundos.
   - Dá para exportar tudo em CSV.
@@ -136,9 +138,12 @@ gratuito para as suas próprias contas (até 5 conexões, todas do mesmo titular
 - Se você já importou o PDF de uma fatura, a sincronização marca os lançamentos iguais como
   "possível duplicado" e os deixa desmarcados.
 
-## Gastos fixos
+## Renda e gastos fixos
 
-Na aba **🔁 Fixos**, cadastre uma vez o que se repete todo mês (aluguel, condomínio, internet, escola,
+Na aba **🎯 Planejar**, cadastre a renda de vocês (salários todo mês, ou um valor só num mês). É com
+ela que o painel calcula quanto sobra.
+
+Na mesma aba, cadastre uma vez os gastos que se repetem todo mês (aluguel, condomínio, internet, escola,
 plano de saúde): valor, categoria, dia e a partir de que mês. O app lança o gasto sozinho em cada mês,
 desde o mês inicial até o mês atual, e no começo de cada mês novo.
 

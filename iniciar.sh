@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Inicia o Nossos Gastos (macOS / Linux). Na primeira vez, instala tudo sozinho.
+# Inicia o Controle dos Tolinos (macOS / Linux). Na primeira vez, instala tudo sozinho.
 set -e
 cd "$(dirname "$0")"
 

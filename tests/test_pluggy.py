@@ -413,6 +413,9 @@ def test_real_case_each_entry_in_its_bill(real_case):
         "pluggy:r8": "2027-01",  # 4/9 of a purchase first billed in October
         "pluggy:n1": "2026-10", "pluggy:n2": "2026-11",
     }  # and the June bill (r9) stays out
+    # Each card's cycle, for the dashboard to tell open bills from closed ones.
+    assert result["cycles"] == {"Sant cartão": {"closing_day": 9, "due_day": 17},
+                                "Inter cartão": {"closing_day": 11, "due_day": 18}}
 
 
 def test_real_case_check_matches_the_bills(client, real_case):

@@ -1,5 +1,5 @@
 @echo off
-REM Inicia o Nossos Gastos (Windows). Na primeira vez, instala tudo sozinho.
+REM Inicia o Controle dos Tolinos (Windows). Na primeira vez, instala tudo sozinho.
 cd /d "%~dp0"
 
 if not exist .venv\Scripts\python.exe (

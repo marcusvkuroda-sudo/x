@@ -36,7 +36,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="Nossos Gastos", lifespan=lifespan)
+app = FastAPI(title="Controle dos Tolinos", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -51,7 +51,7 @@ async def password_guard(request: Request, call_next):
                 return await call_next(request)
         except ValueError:
             pass
-    return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Nossos Gastos"'})
+    return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Controle dos Tolinos"'})
 
 
 # ---------------------------------------------------------------- models
@@ -154,6 +154,8 @@ def meta():
         "model": config.CLAUDE_MODEL,
         "api_key_configured": config.has_api_key(),
         "reader": "claude" if config.use_claude() else "local",
+        # Closing and due day of each connected card, to tell open bills from closed ones.
+        "cards": pluggy.load_settings()["cards"],
     }
 
 
@@ -553,6 +555,67 @@ def delete_fixed(fixed_id: int, remove_entries: bool = False):
         conn.execute("DELETE FROM fixed_expenses WHERE id = ?", (fixed_id,))
 
 
+# ---------------------------------------------------------------- income
+
+
+class IncomeIn(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    description: str = Field(min_length=1, max_length=200)
+    amount_cents: int = Field(gt=0)
+    start_month: str = MonthStr
+    # Same as start_month for a one-off income (a bonus); empty = every month from the start.
+    end_month: str | None = Field(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+
+    @field_validator("end_month", mode="before")
+    @classmethod
+    def empty_is_none(cls, v):
+        return v or None
+
+
+def _check_income(i: IncomeIn) -> None:
+    if i.end_month and i.end_month < i.start_month:
+        raise HTTPException(422, "O mês final precisa ser igual ou depois do mês inicial.")
+
+
+@app.get("/api/incomes")
+def list_incomes():
+    with db.session() as conn:
+        rows = conn.execute("SELECT * FROM incomes ORDER BY start_month DESC, amount_cents DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/incomes", status_code=201)
+def create_income(i: IncomeIn):
+    _check_income(i)
+    with db.session() as conn:
+        cur = conn.execute(
+            "INSERT INTO incomes (description, amount_cents, start_month, end_month) VALUES (?, ?, ?, ?)",
+            (i.description, i.amount_cents, i.start_month, i.end_month),
+        )
+        return dict(conn.execute("SELECT * FROM incomes WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+
+@app.put("/api/incomes/{income_id}")
+def update_income(income_id: int, i: IncomeIn):
+    _check_income(i)
+    with db.session() as conn:
+        changed = conn.execute(
+            "UPDATE incomes SET description = ?, amount_cents = ?, start_month = ?, end_month = ? WHERE id = ?",
+            (i.description, i.amount_cents, i.start_month, i.end_month, income_id),
+        ).rowcount
+        if not changed:
+            raise HTTPException(404, "Renda não encontrada.")
+        return dict(conn.execute("SELECT * FROM incomes WHERE id = ?", (income_id,)).fetchone())
+
+
+@app.delete("/api/incomes/{income_id}", status_code=204)
+def delete_income(income_id: int):
+    with db.session() as conn:
+        if conn.execute("DELETE FROM incomes WHERE id = ?", (income_id,)).rowcount == 0:
+            raise HTTPException(404, "Renda não encontrada.")
+
+
 # ---------------------------------------------------------------- bank sync (Open Finance)
 
 
@@ -703,7 +766,7 @@ def _run_bank_sync(import_id: int) -> None:
                 (month, ext_id, month),
             )
     _finish_import(import_id, result)
-    pluggy.mark_synced(started)
+    pluggy.mark_synced(started, result["cycles"])
 
 
 @app.post("/api/bank/sync", status_code=202)

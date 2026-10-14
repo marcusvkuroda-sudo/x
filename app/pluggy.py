@@ -144,28 +144,38 @@ def load_settings() -> dict:
     client_secret = data.get("client_secret") or os.environ.get("PLUGGY_CLIENT_SECRET", "")
     item_ids = data.get("item_ids") or parse_item_ids(os.environ.get("PLUGGY_ITEM_IDS", ""))
     return {"client_id": client_id.strip(), "client_secret": client_secret.strip(), "item_ids": item_ids,
-            "last_sync": data.get("last_sync")}
+            "last_sync": data.get("last_sync"), "cards": data.get("cards") or {}}
 
 
-def save_settings(client_id: str, client_secret: str, item_ids: list[str], last_sync: str | None = None) -> None:
+def _saved() -> dict:
+    try:
+        return json.loads(settings_path().read_text("utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def save_settings(client_id: str, client_secret: str, item_ids: list[str], last_sync: str | None = None,
+                  cards: dict | None = None) -> None:
+    """cards: each card's cycle ({source: {closing_day, due_day}}); None keeps the saved one."""
     config.ensure_dirs()
     path = settings_path()
+    if cards is None:
+        cards = _saved().get("cards") or {}
     path.write_text(json.dumps({"client_id": client_id, "client_secret": client_secret, "item_ids": item_ids,
-                                "last_sync": last_sync}, indent=2), "utf-8")
+                                "last_sync": last_sync, "cards": cards}, indent=2), "utf-8")
     try:
         path.chmod(0o600)
     except OSError:
         pass
 
 
-def mark_synced(when: str) -> None:
-    """Records the time of the last sync, leaving the rest of the saved file as it is (settings
-    that came from .env stay there)."""
-    try:
-        data = json.loads(settings_path().read_text("utf-8"))
-    except (FileNotFoundError, ValueError):
-        data = {}
-    save_settings(data.get("client_id", ""), data.get("client_secret", ""), data.get("item_ids") or [], when)
+def mark_synced(when: str, cards: dict | None = None) -> None:
+    """Records the time of the last sync and the cards' cycles, leaving the rest of the saved file
+    as it is (settings that came from .env stay there)."""
+    data = _saved()
+    if cards is not None:
+        cards = {**(data.get("cards") or {}), **cards}
+    save_settings(data.get("client_id", ""), data.get("client_secret", ""), data.get("item_ids") or [], when, cards)
 
 
 def parse_item_ids(text: str) -> list[str]:
@@ -471,6 +481,7 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
     left_out = 0
     open_bills = {}  # (card, statement month) -> cents of the purchases not billed yet
     remove_ids = set()
+    cycles = {}  # card -> closing and due days, for the dashboard
     for item in describe_items(client, item_ids):
         banks.append(item["bank"])
         if item["status"] in ("LOGIN_ERROR", "OUTDATED", "WAITING_USER_INPUT", "ERROR"):
@@ -482,6 +493,8 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
             card = account.get("type") == "CREDIT"
             bills = CardBills(client, account, now) if card else None
             source = f"{item['bank']} {'cartão' if card else 'débito'}"
+            if card and bills.due_day:
+                cycles[source] = {"closing_day": bills.closing_day, "due_day": bills.due_day}
             date_from = card_from if card else since
             for t in client.cursor("/v2/transactions", accountId=account["id"], dateFrom=date_from.isoformat()):
                 # The open bill's purchases come as PENDING (no bill yet) and turn POSTED, keeping
@@ -563,6 +576,7 @@ def fetch(client: Client, item_ids: list[str], since: date, known_ids: set[str])
         "warnings": warnings,
         "bill_updates": bill_updates,
         "remove_ids": sorted(remove_ids),
+        "cycles": cycles,
         "model": "open-finance",
         "input_tokens": None,
         "output_tokens": None,

@@ -62,6 +62,16 @@ CREATE TABLE IF NOT EXISTS fixed_months (
     PRIMARY KEY (fixed_id, month)
 );
 
+-- Money coming in each month (salaries...), to know how much is left after the spending.
+CREATE TABLE IF NOT EXISTS incomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    description TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    start_month TEXT NOT NULL,         -- YYYY-MM
+    end_month TEXT,                    -- YYYY-MM, last month included; NULL = every month from the start
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
 -- Category corrections made by the couple, applied to future imports.
 CREATE TABLE IF NOT EXISTS category_rules (
     key TEXT PRIMARY KEY,              -- "d:<normalized description>" or "m:<normalized merchant>"
